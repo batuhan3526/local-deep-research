@@ -1,0 +1,26 @@
+# SearXNG settings for local-deep-research. Everything not listed here keeps SearXNG's defaults.
+use_default_settings: true
+
+general:
+  instance_name: "local-deep-research search"
+
+search:
+  safe_search: 0
+  # ldr reads results as JSON (/search?q=...&format=json). Without "json" here SearXNG answers 403 Forbidden.
+  formats:
+    - html
+    - json
+
+server:
+  # Replace with a random string before the first start, e.g. the output of:
+  #   python -c "import secrets; print(secrets.token_hex(32))"
+  # SearXNG refuses to start with its stock placeholder "ultrasecretkey".
+  secret_key: "replace-with-a-long-random-string"
+  # The limiter blocks bursts of requests from one client. ldr is that one client and sends many queries per
+  # round, so it is off. That is safe only because docker-compose.yml binds the port to 127.0.0.1.
+  limiter: false
+  image_proxy: false
+  method: "GET"
+
+ui:
+  static_use_hash: true

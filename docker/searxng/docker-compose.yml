@@ -1,0 +1,29 @@
+# SearXNG for local-deep-research: one container, reachable only from this machine.
+#   docker compose up -d        (in this folder)
+#   ldr doctor                  (checks http://localhost:8888 and the JSON format)
+# The port is bound to 127.0.0.1 on purpose: this instance has the rate limiter off (see settings.yml), so it must not
+# be reachable from the network. Change "8888" on the left side if the port is taken, and set searxng_url to match.
+services:
+  searxng:
+    # A moving tag keeps the search engines' scrapers current (they break as sites change); pin a dated tag
+    # (e.g. searxng/searxng:2025.x.y-<sha>) if you need a reproducible setup.
+    image: docker.io/searxng/searxng:latest
+    container_name: ldr-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"

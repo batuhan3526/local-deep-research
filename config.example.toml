@@ -1,0 +1,80 @@
+# local-deep-research settings. Copy to ./ldr.toml (per project) or to the user config file:
+#   Linux    ~/.config/local-deep-research/config.toml
+#   macOS    ~/Library/Application Support/local-deep-research/config.toml
+#   Windows  %APPDATA%\local-deep-research\config.toml
+# or point LDR_CONFIG (or `ldr --config FILE`) at it. Every key is optional: the values shown are the defaults.
+#
+# Environment variables win over this file: LDR_<KEY> with the flat key name in capitals, e.g.
+#   LDR_LLM_BASE_URL=http://localhost:11434/v1   LDR_LLM_MODEL=qwen3:32b   LDR_SEARXNG_URL=http://localhost:8888
+# OPENAI_BASE_URL / OPENAI_API_KEY are used when LDR_LLM_BASE_URL / LDR_LLM_API_KEY are not set.
+#
+# Sections are a spelling, not a separate namespace: `[llm] base_url = ...` is read as `llm_base_url = ...`.
+# Plain keys must come before the first [section] (a TOML rule).
+
+# ---------- local models (sentence-transformers, downloaded from Hugging Face on first use) ----------
+# Embeddings for clustering claims and finding passages that corroborate them. Runs on the CPU.
+embed_model = "sentence-transformers/all-MiniLM-L6-v2"
+# A larger embedding model used only when a CUDA GPU has free memory; "" = always use embed_model.
+embed_model_gpu = "BAAI/bge-m3"
+# Where embeddings run: auto (a GPU only when one has room) | cpu | cuda | cuda:N | mps (Apple).
+embed_device = "auto"
+# Embeddings for non-English search results (multilingual search).
+multilingual_embed_model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# Reranks search results before pages are fetched.
+cross_encoder = "cross-encoder/ms-marco-MiniLM-L6-v2"
+# Reranker for non-English search results.
+multilingual_cross_encoder = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+
+# ---------- folders ----------
+# Page cache shared by all research topics (fetched pages, the search index). "" = the user cache dir
+# (Linux ~/.cache/local-deep-research, macOS ~/Library/Caches/local-deep-research, Windows %LOCALAPPDATA%\...).
+cache_dir = ""
+# Where `ldr new` / `ldr run "question"` create topic folders. "" = ./research-projects under the current folder.
+research_root = ""
+
+# ---------- source selection ----------
+# Share of each round's selected pages reserved for scholarly sources (journals, DOI / arXiv pages, scholarly
+# encyclopedias, university repositories) when enough relevant ones are found; the rest go by relevance. 0 = off.
+academic_share = 0.4
+
+# ---------- telemetry / optional integrations ----------
+# Prometheus /metrics of the LLM server (vLLM, SGLang) for the run's telemetry. "" = derived from [llm] base_url.
+metrics_url = ""
+# Only for the optional opencode agent mode (integrations/opencode): path of its opencode.db.
+opencode_db = ""
+
+[llm]
+# Any OpenAI-compatible chat-completions server, up to and including /v1.
+#   vLLM       http://localhost:8000/v1      llama.cpp  http://localhost:8080/v1
+#   Ollama     http://localhost:11434/v1     LM Studio  http://localhost:1234/v1
+base_url = "http://localhost:8000/v1"
+# Model id as the server lists it at <base_url>/models. "" = the first model the server lists.
+model = ""
+# Sent as "Authorization: Bearer <key>". "" = no header (most local servers need none).
+api_key = ""
+# The context window the server was started with, in tokens. Prompts are sized to fit below it.
+# 32768 or more is recommended; smaller windows work but each call sees less evidence.
+context = 32768
+# Requests sent in parallel. Servers that batch (vLLM, SGLang) handle 16-64 well. For llama.cpp or Ollama, match
+# the server's parallel slots (llama-server --parallel N, OLLAMA_NUM_PARALLEL); extra requests just wait in its queue.
+concurrency = 16
+# Seconds per request and retries per call. Long answers on a slow server can need minutes.
+timeout = 900
+retries = 3
+# true = send chat_template_kwargs.enable_thinking=false. Turn it on for "thinking" models (Qwen3 and similar):
+# otherwise they reason at length before every answer. Leave it off for servers that reject unknown fields.
+no_think = false
+# "json_object" asks the server for JSON output (vLLM, llama.cpp, SGLang, Ollama). "none" for servers that reject
+# it (LM Studio only takes json_schema): the answer is then parsed from plain text.
+json_mode = "json_object"
+
+[extract]
+# Optional second, smaller/faster model for the bulk work (claim extraction from pages, relevance judging).
+# Leave all three empty to use the [llm] model for everything.
+base_url = ""        # "" = [llm] base_url
+model = ""           # "" = the first model listed by this server (or the [llm] model when base_url is empty)
+api_key = ""         # "" = [llm] api_key
+
+[searxng]
+# A SearXNG instance with the JSON format enabled (docker/searxng has a ready setup). "/search" is appended.
+url = "http://localhost:8888"

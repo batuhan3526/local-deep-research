@@ -1,0 +1,33 @@
+# local-deep-research: one research run as a systemd user service that resumes after a crash or reboot.
+# Template: replace the @...@ placeholders (see README.md), install to ~/.config/systemd/user/, then
+#   systemctl --user start "ldr-research@$(systemd-escape --path /path/to/topic).service"
+# The instance name is the escaped topic folder; %f gives it back as a path. `ldr run` skips every finished phase,
+# so a restart continues where the files say the run stopped; a finished run exits at once.
+[Unit]
+Description=local-deep-research run on %f
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=@LDR@ run %f
+Restart=on-failure
+RestartSec=120
+# settings: LDR_LLM_BASE_URL, LDR_LLM_API_KEY, LDR_SEARXNG_URL ... (or an ldr.toml; see config.py)
+EnvironmentFile=-@ENV_FILE@
+Environment=PYTHONUNBUFFERED=1
+# sandbox: the system and home read-only; only the topic and the page cache are writable
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=%f @CACHE_DIR@
+# the run never needs these (add your own secrets folders)
+InaccessiblePaths=-%h/.ssh -%h/.gnupg -%h/.aws -%h/.config/gh -%h/.git-credentials
+# resource caps: a runaway parser cannot take the host down
+MemoryMax=@MEMORY_MAX@
+TasksMax=1024
+
+[Install]
+WantedBy=default.target
