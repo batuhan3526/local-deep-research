@@ -15,6 +15,7 @@ from _suite import finish, scratch  # noqa: E402  (sets hermetic LDR_* env first
 SCRATCH = scratch("quality-test-")
 
 from local_deep_research import corpus  # noqa: E402
+REAL_JUDGE = corpus.llm_judge  # later checks replace it with fakes
 from local_deep_research import rt_embed  # noqa: E402
 import hashlib  # noqa: E402
 import re  # noqa: E402
@@ -316,6 +317,25 @@ class FakeHTTP:
 
 cl_, fu_ = asyncio.run(corpus.llm_extract(FakeHTTP(), "q", "https://x.org", "text"))
 check("llm_extract returns (claims, followups)", cl_ == [good] and fu_ == ["Which embargo length works for h=20?"])
+
+
+class CutHTTP:
+    """cut (finish_reason length, empty answer) below 800 tokens, a verdict from 800 up"""
+    def __init__(self):
+        self.budgets = []
+
+    async def post(self, url, json=None):
+        self.budgets.append(json["max_tokens"])
+        if json["max_tokens"] < 800:
+            return type("R", (), {"raise_for_status": lambda s: None,
+                                  "json": lambda s: {"choices": [{"finish_reason": "length", "message": {"content": ""}}]}})()
+        return FakeResp('{"verdict": "supports", "quote": "the walls held for two months"}')
+
+
+h_ = CutHTTP()
+v_ = asyncio.run(REAL_JUDGE(h_, "claim", "https://x.org", "passage"))
+check("llm_judge: an answer cut at max_tokens is retried with a doubled budget (live: 10 of 2,684 cut at 400)",
+      v_ == ("supports", "the walls held for two months") and h_.budgets == [400, 800], (v_, h_.budgets))
 for f in ("extracted.jsonl", ".extracted", "followups.jsonl"):
     (root / "claims" / f).unlink(missing_ok=True)
 calls = []

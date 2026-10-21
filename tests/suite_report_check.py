@@ -214,6 +214,26 @@ check("assemble: section files not rewritten", (ar / "report/06-karsi.md").read_
 _, issues = cr.audit_headings(rep)
 check("check_report agrees: no heading issue after assemble", not issues, issues)
 
+# evidence ids without a URL get the pack's source URL (live run 2026-10-21: 71 of 189 tags "unsourced")
+urls_ = {"S2-0120": ["https://doi.org/10.1/a"], "S2-0114": ["https://b.org/x", "https://c.org/y"]}
+txt, n = assemble_report.cite_urls([
+    "## S2 heading ⟨S2-0120⟩\n"
+    "Janissaries declined [Orta] ⟨S2-0120⟩. Sipahis numbered 80,000 [Orta] ⟨S2-0114⟩, again ⟨S2-0120⟩.\n"
+    "- already sourced [Orta] (https://e.org/z) ⟨S2-0114⟩\n"
+    "- unknown id [Düşük] ⟨S9-0001⟩\n```\ncode ⟨S2-0120⟩\n```"], urls_)
+t0 = txt[0]
+check("cite_urls: a line with ids and no URL gets each id's first URL once, before the id",
+      "declined [Orta] (https://doi.org/10.1/a) ⟨S2-0120⟩" in t0 and "80,000 [Orta] (https://b.org/x) ⟨S2-0114⟩" in t0
+      and "again ⟨S2-0120⟩." in t0 and n == 1, (n, t0))
+check("cite_urls: headings, lines with a URL, unknown ids and fenced code untouched",
+      t0.startswith("## S2 heading ⟨S2-0120⟩\n") and "- already sourced [Orta] (https://e.org/z) ⟨S2-0114⟩" in t0
+      and "- unknown id [Düşük] ⟨S9-0001⟩" in t0 and "code ⟨S2-0120⟩" in t0, t0)
+(ar / "claims").mkdir()
+(ar / "claims/subq-2.md").write_text('- **Orta** (1 alan) Decline after 1650. — "quote [x]" [https://doi.org/10.1/a, '
+                                     'https://f.org/q] ⟨S2-0120⟩\n', encoding="utf-8")
+check("pack_urls: the URL bracket right before the id, in order", assemble_report.pack_urls(ar) ==
+      {"S2-0120": ["https://doi.org/10.1/a", "https://f.org/q"]}, assemble_report.pack_urls(ar))
+
 # ---------- D. local_facts ----------
 lf = SCRATCH / "lf"; (lf / "notes").mkdir(parents=True)
 NOTES = """# Local Project Summary
@@ -252,5 +272,15 @@ big = SCRATCH / "lfb"; (big / "notes").mkdir(parents=True)
 (big / "notes/local-project.md").write_text("- IC 0.1 head\n" * 5000, encoding="utf-8")
 rc, out = run_module("local_facts", big)
 check("local_facts: line cap", rc == 0 and (big / "claims/local-facts.md").read_text(encoding="utf-8").count("\n- L") == local_facts.MAX_LINES)
+
+# executive summary headings: fixed names per output language (live run 2026-10-21: a free translation of
+# "confidence overview" came out as "Güvenlik Özeti" = security summary)
+from local_deep_research import synthesis  # noqa: E402
+for code, want in (("tr", ("## Temel bulgular", "## Yapılması gerekenler", "## Güven özeti")),
+                   ("en", ("## Key findings", "## What to do", "## Confidence overview"))):
+    L_ = synthesis.TXT[code]
+    p_ = synthesis.SUMMARY_PROMPT.format(brief="b", data="d", title=L_["summary"], groups="g", lang=code, rules="r",
+                                         findings=L_["findings"], todo=L_["todo"], overview=L_["overview"])
+    check(f"summary prompt ({code}): the three section headings are given by name", all(w in p_ for w in want), p_)
 
 finish(RESULTS, SCRATCH)

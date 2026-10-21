@@ -132,6 +132,27 @@ def grow_budget(max_tokens, prompt):
     bigger = min(MAX_OUT, max_tokens * 2, answer_room(prompt))
     return bigger if bigger > max_tokens else None
 
+async def post_json(http, url, body, kind, meta=None, tries=3):
+    """POST a JSON-mode chat completion and parse its JSON answer; an answer cut at max_tokens is retried with twice
+    the budget (live run 2026-10-21: 10 of 2,684 judge answers were cut at 400 tokens and their pages lost the
+    verdict). Raises AnswerCut after the last try, transport / HTTP / JSON errors as before."""
+    prompt = "".join(str(m.get("content") or "") for m in body.get("messages", []))
+    for t in range(tries):
+        t0 = time.monotonic()
+        r = await http.post(url, json=body)
+        r.raise_for_status()
+        llmlog.record(kind, body, r.json(), time.monotonic() - t0, meta)
+        try:
+            check_cut(r.json())
+        except AnswerCut:
+            bigger = grow_budget(body["max_tokens"], prompt)
+            if t + 1 == tries or bigger is None:
+                raise
+            body = {**body, "max_tokens": bigger}
+            continue
+        return parse_json(r.json()["choices"][0]["message"]["content"])
+
+
 
 def chat_extra(json_mode=False):
     """request fields beyond the OpenAI basics, only what the configured server should get: response_format when
@@ -464,11 +485,7 @@ async def screen_all(urls, conc):
                     **chat_extra(json_mode=True)}
             async with sem:
                 try:
-                    t0 = time.monotonic()
-                    r = await http.post(ep("EXTRACT_URL"), json=body)
-                    r.raise_for_status()
-                    llmlog.record("screen", body, r.json(), time.monotonic() - t0, {"url": u})
-                    v = validate_screen(parse_json(r.json()["choices"][0]["message"]["content"]))
+                    v = validate_screen(await post_json(http, ep("EXTRACT_URL"), body, "screen", {"url": u}))
                 except Exception as e:
                     print(f"  screen failed {inline(u, 200)}: {str(e)[:120]}", file=sys.stderr)
                     return
@@ -1183,11 +1200,7 @@ async def llm_extract(http, q, url, text):
     # 3000: dense paper chunks ran out at 2000 (live: 2 of 894 calls, the JSON cut mid-string, retried in vain)
     body = {"model": ep("EXTRACT_MODEL"), "temperature": 0.1, "max_tokens": 3000, "messages": extract_messages(q, url, text),
             **chat_extra(json_mode=True)}
-    t0 = time.monotonic()
-    r = await http.post(ep("EXTRACT_URL"), json=body)
-    r.raise_for_status()
-    llmlog.record("extract", body, r.json(), time.monotonic() - t0, {"url": url})
-    obj = parse_json(r.json()["choices"][0]["message"]["content"])
+    obj = await post_json(http, ep("EXTRACT_URL"), body, "extract", {"url": url})
     return validate_claims(obj), validate_followups(obj)
 
 
@@ -1538,11 +1551,7 @@ def validate_judgement(obj):
 async def llm_judge(http, claim, url, passage):
     body = {"model": ep("EXTRACT_MODEL"), "temperature": 0.0, "max_tokens": 400, "messages": judge_messages(claim, url, passage),
             **chat_extra(json_mode=True)}
-    t0 = time.monotonic()
-    r = await http.post(ep("EXTRACT_URL"), json=body)
-    r.raise_for_status()
-    llmlog.record("judge", body, r.json(), time.monotonic() - t0, {"url": url})
-    return validate_judgement(parse_json(r.json()["choices"][0]["message"]["content"]))
+    return validate_judgement(await post_json(http, ep("EXTRACT_URL"), body, "judge", {"url": url}))
 
 
 async def judge_all(pairs, conc, on_done, take=None):
@@ -1899,11 +1908,7 @@ async def review_all(pairs, conc, lang="English"):
                     **chat_extra(json_mode=True)}
             async with sem:
                 try:
-                    t0 = time.monotonic()
-                    r = await http.post(ep("VLLM"), json=body)
-                    r.raise_for_status()
-                    llmlog.record("review", body, r.json(), time.monotonic() - t0, {"url": u2})
-                    o = parse_json(r.json()["choices"][0]["message"]["content"])
+                    o = await post_json(http, ep("VLLM"), body, "review", {"url": u2})
                 except Exception as e:
                     print(f"  review failed {inline(u2, 200)}: {str(e)[:120]}", file=sys.stderr)
                     return
