@@ -191,7 +191,54 @@ yeniden yaptırmak için çıktı dosyasını silin. İndirilen sayfalar ortak �
 - "Doğrulanmış", "alıntılanmış" demektir, "doğru" demek değildir. Önemli kararlarda kaynakları okuyun.
 - Giriş isteyen ya da yalnızca JavaScript ile açılan sayfalardan metin alınamaz.
 - Tıbbi, hukuki, finansal ya da güvenlik açısından kritik kararlarda uzman incelemesinin yerini tutmaz.
-- Ticari deep-research ürünleriyle karşılaştırmalı bir ölçüm yapılmamıştır ve böyle bir iddiada bulunulmaz.
+- Ticari deep-research ürünleriyle yalnızca tek soruluk küçük bir karşılaştırma yapıldı (aşağıda). Bu bir ölçüm
+  (benchmark) değildir.
+
+## Örnek ve karşılaştırma: ChatGPT, Gemini ve ldr
+
+Ekim 2026'da üç araca Türkçe olarak aynı soru soruldu: *1683 Osmanlı Viyana kuşatması neden başarısız oldu? Askeri,
+lojistik ve siyasi nedenler ve tarihçilerin bunları nasıl tarttığı.* Üç rapor
+[examples/vienna-1683](../examples/vienna-1683) klasöründedir:
+
+| Dosya | Araç |
+|---|---|
+| [chatgpt-free.pdf](../examples/vienna-1683/chatgpt-free.pdf) | ChatGPT, ücretsiz plan (Deep Research) |
+| [gemini-ai-plus.pdf](../examples/vienna-1683/gemini-ai-plus.pdf) | Gemini Deep Research, Google AI Plus paketi |
+| [local-deep-research-REPORT.pdf](../examples/vienna-1683/local-deep-research-REPORT.pdf) | `ldr run --profile normal --out-lang tr`, yerel vLLM sunucusunda ~27B açık model, ~4,5 saat |
+
+**Yöntem.** Her rapordan sabit bir kuralla 12 iddia seçildi: bölümler baştan sona gezilip kaynak gösterilmiş ve
+tarih, sayı ya da adı geçen bir kişinin eylemini içeren ilk iddialar alındı. Her iddiada gösterilen sayfa açıldı
+("kaynakta yazıyor mu?") ve iddia TDV İslâm Ansiklopedisi, Belleten, Ágoston, Stoye gibi başvuru eserlerine karşı
+denetlendi ("doğru mu?"). Her rapora ayrı bir denetçi baktı; ldr'nin raporuna da diğerleriyle aynı sertlikte
+bakıldı. Notlar: [examples/vienna-1683/fact-check](../examples/vienna-1683/fact-check). **Rapor başına n = 12, tek
+soru, her araçtan tek çalıştırma:** farklar kesin ölçüm değil, eğilimdir.
+
+| | ChatGPT (ücretsiz) | Gemini (AI Plus) | local-deep-research |
+|---|---|---|---|
+| Uzunluk | 3 sayfa, ~1.050 kelime | 12 sayfa, ~3.160 kelime | 142 sayfa, ~43.000 kelime |
+| Okuyucunun açabileceği kaynak | **0** (`【63†L54-L61】` biçimindeki atıflar URL'ye çözülmüyor) | 31 URL, 22 alan adı | 197 URL, 120 alan adı |
+| Akademik kaynak | — | 12 | 55 |
+| Forum / video / korsan kopya | — | 8 (Reddit ×2, YouTube, Scribd ×2, dokumen.pub, ...) | 1 podcast; ama çok sayıda blog ve yapay zekâyla yazılmış site |
+| Kaynakta yazıyor mu? (12 iddia) | ölçülemez | 4 evet, 5 kısmen, **2 kaynakta yok**, 1 erişilemedi | **10 evet**, 1 kısmen, **0 kaynakta yok**, 1 erişilemedi |
+| Doğru mu? (12 iddia) | 4 doğru, 3 büyük ölçüde, **3 yanlış**, 2 doğrulanamadı | 3 doğru, 5 büyük ölçüde, 3 tartışmalı, **1 yanlış** | 5 doğru, 3 büyük ölçüde, 1 tartışmalı, **1 yanlış**, 2 doğrulanamadı |
+| Örneklem dışında bulunan ciddi hatalar | "III. Viyana Kuşatması"; Papa'ya "Sultan"; uydurma esir yakma olayı | karar yeri Belgrad (doğrusu İstolni Belgrad); 18 `[cite: N]` artığı; Reddit / Ekşi Şeyler'e "Yüksek" güven | 1689 Niş muharebe düzeni 1683 Viyana diye; yapay zekâ podcast'inden uydurma bir yeniçeri isyanı; yanlış 1687 tahttan indirme; 5 `[UNSUPPORTED ...]` artığı; "Yüksek" etiketlerin yaklaşık yarısı blog kaynaklı |
+
+| Ölçüt | Sıralama |
+|---|---|
+| İzlenebilirlik (okuyucu her iddiayı kontrol edebilir mi?) | ldr > Gemini >> ChatGPT |
+| Kaynağa sadakat | ldr > Gemini > ChatGPT (ölçülemez) |
+| Olgusal doğruluk (örneklem) | ldr ≈ Gemini > ChatGPT |
+| Kaynak kalitesi | Gemini ≈ ldr > ChatGPT |
+| Tarih yazımı, analiz, anlatım | **Gemini** > ldr > ChatGPT |
+| Kapsam ve ayrıntı | ldr >> Gemini > ChatGPT |
+| Türkçe dil kalitesi | **Gemini** > ChatGPT > ldr |
+| Süre ve maliyet | ChatGPT ve Gemini: dakikalar, bulut. ldr: saatler, kendi donanımınız, bulut LLM'e veri gitmez |
+
+Kısaca: ChatGPT'nin ücretsiz raporu kısa ve kontrol edilemiyor. Gemini en iyi analizi ve Türkçeyi yazıyor, ama
+zayıf kaynaklara yüksek güven veriyor ve kaynağında olmayan iki iddiası var. ldr'nin raporu en izlenebilir, kaynağa
+en sadık ve açık ara en uzun olanı. Zayıflıkları da gerçek: yapay zekâyla yazılmış ve popüler siteler hâlâ araya
+girip "Yüksek" etiket alabiliyor, başka yılların olayları karışabiliyor ve Türkçede çeviri hataları var. Bunlar
+sıradaki iyileştirmeleri gösteriyor.
 
 ## Lisans
 

@@ -33,6 +33,7 @@ cited report with a confidence level for each finding.
 - [Resuming](#resuming)
 - [Troubleshooting](#troubleshooting)
 - [Limitations](#limitations)
+- [Example and comparison: ChatGPT vs Gemini vs ldr](#example-and-comparison-chatgpt-vs-gemini-vs-ldr)
 - [Development](#development) · [License](#license)
 
 Türkçe: [docs/README.tr.md](docs/README.tr.md)
@@ -328,7 +329,54 @@ connected machine, copy `~/.cache/huggingface`, and set `HF_HUB_OFFLINE=1`.
 - **Search coverage** depends on your SearXNG engines and on public API rate limits. Large runs may be throttled.
 - **Long runs.** Big profiles take many hours of GPU time.
 - **Not a substitute for expert review** in medical, legal, financial or safety-critical decisions.
-- No benchmark against commercial deep-research products has been run. No such comparison is claimed.
+- Only one small, single-question comparison with commercial deep-research products has been made (below). It is
+  not a benchmark.
+
+## Example and comparison: ChatGPT vs Gemini vs ldr
+
+One question, asked in Turkish to three tools in October 2026: *Why did the Ottoman siege of Vienna in 1683 fail?
+Military, logistical and political causes, and how historians weigh them.* The three reports are in
+[examples/vienna-1683](examples/vienna-1683):
+
+| File | Tool |
+|---|---|
+| [chatgpt-free.pdf](examples/vienna-1683/chatgpt-free.pdf) | ChatGPT, free plan (Deep Research) |
+| [gemini-ai-plus.pdf](examples/vienna-1683/gemini-ai-plus.pdf) | Gemini Deep Research, Google AI Plus plan |
+| [local-deep-research-REPORT.pdf](examples/vienna-1683/local-deep-research-REPORT.pdf) | `ldr run --profile normal --out-lang tr`, a ~27B open model on a local vLLM server, ~4.5 h |
+
+**Method.** From each report, 12 claims were picked by a fixed rule: walk the sections top to bottom and take the
+first claims that carry a citation and a date, a number or a named person's action. For each claim the cited page
+was opened ("does the source say this?") and the claim was checked against reference works such as TDV İslâm
+Ansiklopedisi, Belleten, Ágoston and Stoye ("is it true?"). Every report got a separate checker, and ldr's report
+was checked as strictly as the others. The notes are in [examples/vienna-1683/fact-check](examples/vienna-1683/fact-check).
+**n = 12 per report, one question, one run each:** read the differences as tendencies, not measurements.
+
+| | ChatGPT (free) | Gemini (AI Plus) | local-deep-research |
+|---|---|---|---|
+| Length | 3 pages, ~1,050 words | 12 pages, ~3,160 words | 142 pages, ~43,000 words |
+| Sources a reader can open | **0** (citations like `【63†L54-L61】` resolve to no URL) | 31 URLs, 22 domains | 197 URLs, 120 domains |
+| Scholarly sources | — | 12 | 55 |
+| Forum / video / pirated copies cited | — | 8 (Reddit ×2, YouTube, Scribd ×2, dokumen.pub, ...) | 1 podcast, but many blogs and AI-written sites |
+| Does the source say it? (12 claims) | not measurable | 4 yes, 5 partly, **2 not in source**, 1 unreachable | **10 yes**, 1 partly, **0 not in source**, 1 unreachable |
+| Is it true? (12 claims) | 4 correct, 3 mostly, **3 wrong**, 2 unverifiable | 3 correct, 5 mostly, 3 disputed, **1 wrong** | 5 correct, 3 mostly, 1 disputed, **1 wrong**, 2 unverifiable |
+| Serious errors found outside the sample | a "third siege of Vienna"; the Pope called "Sultan"; an invented burning of prisoners | decision place given as Belgrade (it was Székesfehérvár); 18 leftover `[cite: N]` markers; High confidence on Reddit / Ekşi Şeyler | a 1689 battle order presented as Vienna 1683; an invented janissary mutiny taken from an AI podcast; a wrong 1687 deposition; 5 leftover `[UNSUPPORTED ...]` notes; about half of the High tags rest on blogs |
+
+| Criterion | Ranking |
+|---|---|
+| Traceability (can a reader check each claim?) | ldr > Gemini >> ChatGPT |
+| Faithfulness to the cited source | ldr > Gemini > ChatGPT (not measurable) |
+| Factual accuracy in the sample | ldr ≈ Gemini > ChatGPT |
+| Source quality | Gemini ≈ ldr > ChatGPT |
+| Historiography, analysis, prose | **Gemini** > ldr > ChatGPT |
+| Coverage and detail | ldr >> Gemini > ChatGPT |
+| Turkish language quality | **Gemini** > ChatGPT > ldr |
+| Time and cost | ChatGPT and Gemini: minutes, cloud. ldr: hours, own hardware, no data to a cloud LLM |
+
+In short: ChatGPT's free report is short and cannot be checked. Gemini writes the best analysis and Turkish, but
+gives high confidence to weak sources and has two claims its sources do not contain. ldr's report is the most
+traceable and the most faithful to its sources, and the longest by far. Its weaknesses are real: AI-written and
+popular sites still slip in and can carry High tags, events from other years can be mixed in, and the Turkish has
+translation errors. These show what to improve next.
 
 ## Development
 
