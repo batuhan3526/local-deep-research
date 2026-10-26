@@ -52,6 +52,36 @@ class Settings:
     llm_json_mode: str = "json_object"   # json_object | none (servers that reject response_format json_object)
     llm_concurrency: int = 16            # parallel requests the server handles well: ~1-4 llama.cpp / Ollama,
                                          # 32-64 vLLM / SGLang on a big GPU
+    llm_token_param: str = "max_tokens"  # max_tokens | max_completion_tokens (OpenAI reasoning / GPT-5 models)
+    llm_temperature: bool = True         # false = never send temperature (models that only take their default)
+    # optional per-stage models: "collect" = plan, search, extraction, verification, notes, gap round; "report" =
+    # outline, analysis, writing, verification of the report. Every empty value falls back to the [llm] one.
+    # start_cmd / stop_cmd: commands that start / stop that stage's server, for two models that do not fit at once
+    collect_base_url: str = ""
+    collect_model: str = ""
+    collect_api_key: str = ""
+    collect_context: str = ""
+    collect_concurrency: str = ""
+    collect_no_think: str = ""
+    collect_json_mode: str = ""
+    collect_token_param: str = ""
+    collect_temperature: str = ""
+    collect_timeout: str = ""
+    collect_start_cmd: str = ""
+    collect_stop_cmd: str = ""
+    report_base_url: str = ""
+    report_model: str = ""
+    report_api_key: str = ""
+    report_context: str = ""
+    report_concurrency: str = ""
+    report_no_think: str = ""
+    report_json_mode: str = ""
+    report_token_param: str = ""
+    report_temperature: str = ""
+    report_timeout: str = ""
+    report_start_cmd: str = ""
+    report_stop_cmd: str = ""
+    stage_ready_timeout: int = 1800      # seconds to wait for a stage's server after its start_cmd
     # optional second (smaller / faster) model for bulk claim extraction and judging; empty = the main one
     extract_base_url: str = ""
     extract_model: str = ""
@@ -160,6 +190,7 @@ def list_models(base_url, api_key="", timeout=10):
 
 
 _SETTINGS = None
+_WRITTEN_MODEL = ""  # llm_model as configured, before get() resolved an empty one from the server
 
 
 def get():
@@ -167,6 +198,8 @@ def get():
     global _SETTINGS
     if _SETTINGS is None:
         s = load()
+        global _WRITTEN_MODEL
+        _WRITTEN_MODEL = s.llm_model
         if not s.llm_model:
             ids = list_models(s.llm_base_url, s.llm_api_key)
             s.llm_model = ids[0] if ids else "default"
@@ -179,5 +212,51 @@ def get():
 
 def set_for_tests(s):
     """install explicit settings (tests, embedding callers); None resets to lazy loading"""
+    global _SETTINGS, _WRITTEN_MODEL
+    _SETTINGS = s
+    _WRITTEN_MODEL = s.llm_model if s else ""
+
+
+def install(s):
+    """make s the process-wide settings for a while (stage switches); unlike set_for_tests it keeps the record of
+    the model id as configured"""
     global _SETTINGS
     _SETTINGS = s
+
+
+def written_model():
+    """llm_model as configured ("" = the server's first model), also after get() resolved it"""
+    get()
+    return _WRITTEN_MODEL
+
+
+STAGES = ("collect", "report")
+STAGE_KEYS = ("base_url", "model", "api_key", "context", "concurrency", "no_think", "json_mode", "token_param",
+              "temperature", "timeout")
+
+
+def stage_overrides(s, stage):
+    """{llm_<key>: value} that the stage's settings change (typed like the llm_ field; empty values inherit)"""
+    fields = {f.name: f for f in dataclasses.fields(Settings)}
+    out = {}
+    for k in STAGE_KEYS:
+        v = str(getattr(s, f"{stage}_{k}", "") or "").strip()
+        if v:
+            out[f"llm_{k}"] = _coerce(fields[f"llm_{k}"], v)
+    return out
+
+
+def stage_settings(s, stage):
+    """a copy of s with the stage's overrides applied to the llm_ settings. A stage on another server without its
+    own model or key gets neither from [llm] (they belong to the [llm] server): the model is then resolved from the
+    stage server's /models list and no key is sent."""
+    o = stage_overrides(s, stage)
+    if "llm_base_url" in o and o["llm_base_url"].rstrip("/") != s.llm_base_url.rstrip("/"):
+        o.setdefault("llm_model", "")
+        o.setdefault("llm_api_key", "")
+    return dataclasses.replace(s, **o)
+
+
+def stage_cmds(s, stage):
+    """(start_cmd, stop_cmd) of a stage ("" when unset)"""
+    return (getattr(s, f"{stage}_start_cmd", "") or "").strip(), (getattr(s, f"{stage}_stop_cmd", "") or "").strip()

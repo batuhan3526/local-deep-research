@@ -131,6 +131,35 @@ export LDR_LLM_MODEL=qwen3:32b                        # isteğe bağlı: varsay�
   llama.cpp için `--parallel`, Ollama için `OLLAMA_NUM_PARALLEL` ile eşleştirin. llama.cpp bağlamı slotlara böler,
   yani `-c` değeri `slot sayısı x llm_context` olmalıdır.
 
+## İki model (hibrit) ve bulut API'leri
+
+Bir çalıştırmanın iki aşaması vardır:
+
+- **collect:** plan, arama, iddia çıkarma, çapraz doğrulama, notlar ve boşluk turu. Binlerce kısa çağrıdan oluşur.
+- **report:** outline, analiz, yazım ve rapor doğrulaması. Daha az ama uzun çağrılardan oluşur.
+
+`ldr.toml` içindeki `[collect]` ve `[report]` bölümleri her aşamaya ayrı bir model, sunucu ya da bulut API'si
+atar. Boş bırakılan her ayar `[llm]`'den alınır. İki model GPU'lara birlikte sığmıyorsa `start_cmd` / `stop_cmd`
+ile ldr aşama geçişinde birini kapatıp diğerini açar.
+
+2x RTX 3090'da aynı soruyla ölçüldü:
+
+- Hızlı bir MoE model (Sage-A1.5, 35B-A3B), yoğun bir 27B modele göre 3-5 kat hızlı ve daha fazla doğrulanmış
+  kanıt topladı.
+- Aynı kanıttan daha iyi raporu 27B model yazdı.
+- Hibrit (Sage toplar, 27B yazar) rapor denetimlerinde en iyi sonucu 2 sa 20 dk'da verdi. 27B tek başına 5 saat
+  sürmüştü.
+
+Ölçümler, önerilen vLLM ayarları ve kurulum için [models.md](models.md) dosyasına, hazır dosyalar için
+[integrations/vllm](../integrations/vllm) klasörüne bakın.
+
+Bulut API'leri (OpenAI, Anthropic, Gemini, OpenRouter, Groq, DeepSeek, Mistral ...) OpenAI uyumlu uç noktalarıyla
+bir aşama ya da ikisi için de kullanılabilir:
+
+- `max_tokens` kabul etmeyen modeller için `token_param = "max_completion_tokens"`;
+- yalnızca varsayılan sıcaklığı kabul eden modeller için `temperature = false`;
+- 429 / 5xx yanıtları `Retry-After` süresi beklendikten sonra yeniden gönderilir.
+
 ## Profiller
 
 | profil | takma ad | tur | alt soru | beklenen kaynak | amaç |

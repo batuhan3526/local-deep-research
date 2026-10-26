@@ -26,6 +26,7 @@ cited report with a confidence level for each finding.
 - [Requirements](#requirements)
 - [Quickstart](#quickstart)
 - [LLM server recipes](#llm-server-recipes)
+- [Two models (hybrid) and hosted APIs](#two-models-hybrid-and-hosted-apis)
 - [SearXNG](#searxng)
 - [Configuration](#configuration)
 - [Profiles](#profiles)
@@ -175,6 +176,29 @@ Notes:
 - **A second, faster model** can do the bulk claim extraction: set `[extract] base_url` / `model`.
 - **API keys:** set `llm_api_key` (or `OPENAI_API_KEY`) if your server requires one.
 
+## Two models (hybrid) and hosted APIs
+
+A run has two stages. **collect** covers plan, search, claim extraction, corroboration, notes and the gap round:
+thousands of short calls. **report** covers outline, analysis, writing and report verification: fewer, long calls.
+`[collect]` and `[report]` in `ldr.toml` give each stage its own model, server or hosted API; empty keys inherit
+`[llm]`. When the two models do not fit on the GPUs together, `start_cmd` / `stop_cmd` let ldr swap them between
+the stages.
+
+Measured on 2x RTX 3090 with one question: a fast MoE model (Sage-A1.5, 35B-A3B) collected more verified evidence
+3-5x faster than a dense 27B model. The dense model wrote the better report from the same evidence. The hybrid, Sage
+collecting and the 27B writing, had the best report checks in 2 h 20 min, against 5 h for the 27B alone.
+
+- Benchmarks, the recommended vLLM settings and the setup: [docs/models.md](docs/models.md).
+- Ready files: [integrations/vllm](integrations/vllm) (Sage serve script, a background start/stop helper, a hybrid
+  `ldr.toml`).
+
+Hosted APIs (OpenAI, Anthropic, Gemini, OpenRouter, Groq, DeepSeek, Mistral ...) work through their
+OpenAI-compatible endpoints, for one stage or both:
+
+- `token_param = "max_completion_tokens"` for models that refuse `max_tokens`;
+- `temperature = false` for models that take only their default;
+- HTTP 429 / 5xx answers are resent after `Retry-After`.
+
 ## SearXNG
 
 `ldr` needs a SearXNG instance that answers `GET /search?q=...&format=json`. The setup in
@@ -212,6 +236,10 @@ key is in [config.example.toml](config.example.toml).
 | `llm_api_key` | `""` | sent as `Authorization: Bearer`; empty = no header |
 | `llm_context` | `32768` | the server's context window in tokens; prompts are sized below it |
 | `llm_concurrency` | `16` | parallel requests |
+| `llm_token_param` | `max_tokens` | answer-length field; `max_completion_tokens` for OpenAI reasoning models / GPT-5 |
+| `llm_temperature` | `true` | `false` = never send a temperature |
+| `collect_*`, `report_*` | `""` | per-stage `base_url`, `model`, `api_key`, `context`, `concurrency`, `no_think`, `json_mode`, `token_param`, `temperature`, `timeout`, `start_cmd`, `stop_cmd`; empty = the `llm_` value ([docs/models.md](docs/models.md)) |
+| `stage_ready_timeout` | `1800` | seconds to wait for a stage's server after its `start_cmd` |
 | `extract_base_url` | `""` | optional second server for bulk claim extraction; empty = `llm_base_url` |
 | `extract_model` | `""` | its model; empty = the first one it lists, or `llm_model` when no second server is set |
 | `extract_api_key` | `""` | its key; empty = `llm_api_key` |

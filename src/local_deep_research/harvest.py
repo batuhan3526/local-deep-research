@@ -275,9 +275,7 @@ def llm_json(prompt, max_tokens=6000, system=None, tries=3):
         body = {"model": corpus.MODEL, "temperature": 0.3, "max_tokens": max_tokens,
                 "messages": msgs, **corpus.chat_extra(json_mode=True)}
         t0 = time.monotonic()
-        r = httpx.post(corpus.VLLM, json=body, timeout=900, headers=corpus.auth(),
-                       trust_env=False)
-        r.raise_for_status()
+        r = corpus.send(corpus.VLLM, body, corpus.auth(), 900)
         corpus.llmlog.record(kind, body, r.json(), time.monotonic() - t0)
         try:
             corpus.check_cut(r.json())

@@ -29,6 +29,8 @@ import threading
 import time
 from typing import Callable, NamedTuple
 
+from . import stages
+
 
 class Phase(NamedTuple):
     name: str
@@ -383,6 +385,8 @@ def run(root, profile_args=(), until=None, plist=None, concurrency=None, sample=
     with run_lock(root):
         log(root, f"run start: {root.parent} (pid {os.getpid()})")
         stop_sampler = start_sampler(root, lambda: current[0]) if sample else (lambda: None)
+        switch = stages.Switcher(lambda m: log(root, m))
+        order = [p.name for p in plist]
         try:
             for p in plist:
                 if p.name == "profile" and ctx.profile_args:
@@ -393,6 +397,14 @@ def run(root, profile_args=(), until=None, plist=None, concurrency=None, sample=
                         break
                     continue
                 current[0] = p.name
+                try:
+                    switch.enter(stages.stage_of(p.name, order))
+                    if not concurrency:  # the stage's own llm_concurrency, unless --concurrency was given
+                        ctx = ctx._replace(conc=int(getattr(config.get(), "llm_concurrency", 16) or 16))
+                except Exception as e:  # noqa: BLE001  a stage server that does not come up stops the run
+                    log(root, f"phase {p.name}: FAILED (stage switch: {type(e).__name__}: {str(e)[:300]}); fix the "
+                              f"[collect] / [report] settings or the server and run `ldr run` again to resume")
+                    return 1
                 t0 = time.monotonic()
                 log(root, f"phase {p.name}: start")
                 try:
@@ -417,6 +429,7 @@ def run(root, profile_args=(), until=None, plist=None, concurrency=None, sample=
             return 0
         finally:
             current[0] = "idle"
+            switch.close()
             stop_sampler()
 
 

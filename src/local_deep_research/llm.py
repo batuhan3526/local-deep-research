@@ -77,16 +77,13 @@ def _messages(messages, system):
 
 def request(messages, max_tokens, kind, json_mode=False, temperature=0.3, timeout=None, meta=None):
     """one POST to /chat/completions -> (content, finish_reason); raises on transport / HTTP / malformed replies"""
-    import httpx
     from . import corpus
     s = _settings()
     body = {"model": s.llm_model, "temperature": temperature, "max_tokens": int(max_tokens), "messages": messages}
     body.update(corpus.chat_extra(json_mode))
     t0 = time.monotonic()
     with _slots():
-        r = httpx.post(s.chat_url, json=body, headers=corpus.auth(), trust_env=False,
-                       timeout=timeout or float(getattr(s, "llm_timeout", 900) or 900))
-    r.raise_for_status()
+        r = corpus.send(s.chat_url, body, corpus.auth(), timeout or float(getattr(s, "llm_timeout", 900) or 900))
     data = r.json()
     llmlog.record(kind, body, data, time.monotonic() - t0, meta)
     ch = (data.get("choices") or [{}])[0]

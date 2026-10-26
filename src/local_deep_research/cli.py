@@ -71,7 +71,7 @@ def _get(url, key="", timeout=5, params=None):
 
 
 def check_llm(s, test_call=True, timeout=5):
-    """[(name, ok, message, fix)] for the chat server: reachable, the model served, one 1-token answer"""
+    """[(name, ok, message, fix)] for the chat server: reachable, the model served, one short answer"""
     url = s.llm_base_url.rstrip("/") + "/models"
     try:
         r = _get(url, s.llm_api_key, timeout)
@@ -94,16 +94,39 @@ def check_llm(s, test_call=True, timeout=5):
     if not test_call:
         return out
     import httpx
+    from . import corpus
     try:
         r = httpx.post(s.chat_url, timeout=120, trust_env=False,
                        headers={"Authorization": f"Bearer {s.llm_api_key}"} if s.llm_api_key else {},
-                       json={"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "Say OK."}]})
+                       json=corpus.wire({"model": model, "max_tokens": 16,
+                                         "messages": [{"role": "user", "content": "Say OK."}]}, s))
         r.raise_for_status()
         r.json()["choices"][0]
     except Exception as e:  # noqa: BLE001
         return out + [("test call", False, f"{s.chat_url} with model {model!r}: {type(e).__name__}: {str(e)[:160]}",
                        "check the server log; the model must accept /chat/completions requests")]
-    return out + [("test call", True, f"model {model!r} answered a 1-token request", "")]
+    return out + [("test call", True, f"model {model!r} answered a short request", "")]
+
+
+def check_models(s, test_call=True, need=("collect", "report")):
+    """check_llm for every server the run uses: [llm] alone, or each stage's ([collect] / [report]) when stage
+    settings are set. A stage with a start_cmd is not checked: ldr starts its server when the stage begins."""
+    from . import config, stages
+    if not stages.configured(s):
+        return check_llm(s, test_call)
+    out, seen = [], set()
+    for st in need:
+        ss = config.stage_settings(s, st)
+        if config.stage_cmds(s, st)[0]:
+            out.append((f"{st} server", True, f"{ss.llm_base_url}: started by {st}_start_cmd when the stage begins",
+                        ""))
+            continue
+        key = (ss.llm_base_url.rstrip("/"), ss.llm_model, ss.llm_api_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        out += [(f"{st}: {n}", ok, m, fix) for n, ok, m, fix in check_llm(ss, test_call)]
+    return out
 
 
 def check_searx(s, timeout=10):
@@ -159,7 +182,7 @@ def cmd_doctor(a):
     s = settings()
     f = config.config_file()
     print(f"config: {f or 'none found (defaults + environment)'}")
-    checks = check_llm(s) + check_searx(s)
+    checks = check_models(s) + check_searx(s)
     if not a.skip_embed:
         checks += check_embed(s)
     return 0 if report(checks + check_dirs(s)) else 1
@@ -265,8 +288,12 @@ def profile_args(root, a):
 
 def preflight(root):
     """the servers this run still needs: the LLM always, SearXNG only while the harvest is not done"""
+    from . import stages
     s = settings()
-    checks = check_llm(s, test_call=False)
+    rows = pipeline.status(root)
+    order = [n for n, _, _, _ in rows]
+    need = tuple(sorted({stages.stage_of(n, order) for n, ok, _, _ in rows if not ok})) or ("report",)
+    checks = check_models(s, test_call=False, need=need)
     if not (root / "harvest/.done").exists() or not (root / "harvest/.gap_done").exists():
         checks += check_searx(s)
     bad = [c for c in checks if not c[1]]

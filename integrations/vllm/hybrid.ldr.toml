@@ -1,0 +1,22 @@
+# Hybrid run on one GPU box: a fast MoE model collects, a dense model writes the report. The two do not fit on
+# 2x 24 GB together, so ldr swaps them between the stages (about 5-10 min per swap). Copy next to a topic as ldr.toml
+# and adjust the paths, ports and models. Measured result: docs/models.md.
+[llm]                                   # the report writer (also used by phases a stage does not override)
+base_url = "http://127.0.0.1:8000/v1"
+model = ""                              # "" = the first model the server lists
+context = 65536
+concurrency = 64
+no_think = true
+
+[collect]
+base_url = "http://127.0.0.1:8002/v1"
+model = "sage-a1.5"
+start_cmd = "integrations/vllm/vllm-bg.sh start sage integrations/vllm/serve-sage-a1.5.sh"
+stop_cmd = "integrations/vllm/vllm-bg.sh stop sage"
+
+[report]
+start_cmd = "integrations/vllm/vllm-bg.sh start writer vllm serve <your dense model> --port 8000 --tensor-parallel-size 2 --max-model-len 65536 --kv-cache-dtype fp8"
+stop_cmd = "integrations/vllm/vllm-bg.sh stop writer"
+
+[searxng]
+url = "http://127.0.0.1:8888"

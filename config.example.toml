@@ -42,6 +42,8 @@ academic_share = 0.4
 metrics_url = ""
 # Only for the optional opencode agent mode (integrations/opencode): path of its opencode.db.
 opencode_db = ""
+# Seconds to wait for a stage's server to list its model after that stage's start_cmd ([collect] / [report]).
+stage_ready_timeout = 1800
 
 [llm]
 # Any OpenAI-compatible chat-completions server, up to and including /v1.
@@ -67,6 +69,57 @@ no_think = false
 # "json_object" asks the server for JSON output (vLLM, llama.cpp, SGLang, Ollama). "none" for servers that reject
 # it (LM Studio only takes json_schema): the answer is then parsed from plain text.
 json_mode = "json_object"
+# Name of the answer-length field: "max_tokens" (most servers) or "max_completion_tokens" (OpenAI reasoning models
+# and GPT-5, which refuse max_tokens).
+token_param = "max_tokens"
+# false = never send a temperature (models that accept only their default, e.g. OpenAI reasoning models).
+temperature = true
+#
+# Hosted APIs that speak the OpenAI chat-completions protocol work with base_url + api_key (+ model). Examples:
+#   OpenAI      https://api.openai.com/v1                                (GPT-5 / o-series: token_param, temperature)
+#   Anthropic   https://api.anthropic.com/v1/                            (its OpenAI-compatible endpoint)
+#   Gemini      https://generativelanguage.googleapis.com/v1beta/openai/
+#   OpenRouter  https://openrouter.ai/api/v1     Groq  https://api.groq.com/openai/v1
+#   DeepSeek    https://api.deepseek.com/v1      Mistral  https://api.mistral.ai/v1
+# Keep no_think = false for them, and lower concurrency to what your plan's rate limit allows: throttled answers
+# (HTTP 429 / 5xx) are resent after the server's Retry-After.
+
+# ---------- per-stage models (optional) ----------
+# The run has two stages: "collect" (plan, search, claim extraction, verification, notes, gap round: thousands of
+# short calls) and "report" (outline, analysis, writing, report verification: fewer, long calls). Each stage may use
+# its own model, server or hosted API; every key left "" inherits the [llm] value. Example measured on 2x RTX 3090
+# (one question, same settings): a fast MoE model collecting + a dense 27B model writing gave the best report in
+# 2 h 20 min, against 5 h with the dense model alone (docs/models.md).
+# start_cmd / stop_cmd: when the two models do not fit on the GPUs together, ldr swaps them: entering a stage runs
+# the other stage's stop_cmd, then this stage's start_cmd, and waits until the server lists the model
+# (stage_ready_timeout). Commands run without a shell; use a script for pipes or &&.
+[collect]
+base_url = ""
+model = ""
+api_key = ""
+context = ""
+concurrency = ""
+no_think = ""
+json_mode = ""
+token_param = ""
+temperature = ""
+timeout = ""
+start_cmd = ""
+stop_cmd = ""
+
+[report]
+base_url = ""
+model = ""
+api_key = ""
+context = ""
+concurrency = ""
+no_think = ""
+json_mode = ""
+token_param = ""
+temperature = ""
+timeout = ""
+start_cmd = ""
+stop_cmd = ""
 
 [extract]
 # Optional second, smaller/faster model for the bulk work (claim extraction from pages, relevance judging).

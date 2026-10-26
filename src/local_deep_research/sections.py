@@ -115,14 +115,11 @@ SOURCES_SPLIT = re.compile(r"(?mi)^#{1,4}\s*(?:references|" + "|".join(sorted({r
 
 def llm(prompt, max_tokens, kind):
     """One Markdown answer from the local model (no tools); raises on transport errors."""
-    import httpx
     body = {"model": corpus.MODEL, "temperature": 0.3, "max_tokens": max_tokens,
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
             **corpus.chat_extra()}
     t0 = time.monotonic()
-    r = httpx.post(corpus.VLLM, json=body, timeout=1800, headers=corpus.auth(),
-                   trust_env=False)
-    r.raise_for_status()
+    r = corpus.send(corpus.VLLM, body, corpus.auth(), 1800)
     corpus.llmlog.record(kind, body, r.json(), time.monotonic() - t0)
     ch = r.json()["choices"][0]
     if ch.get("finish_reason") == "length":

@@ -80,14 +80,11 @@ VERDICTS = ("CONFIRMED", "SUPPORTED-1", "UNSUPPORTED", "CONTRADICTED", "LOCAL")
 
 
 def llm(prompt, max_tokens):
-    import httpx
     body = {"model": corpus.MODEL, "temperature": 0.1, "max_tokens": max_tokens,
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
             **corpus.chat_extra(json_mode=True)}
     t0 = time.monotonic()
-    r = httpx.post(corpus.VLLM, json=body, timeout=1800, headers=corpus.auth(),
-                   trust_env=False)
-    r.raise_for_status()
+    r = corpus.send(corpus.VLLM, body, corpus.auth(), 1800)
     corpus.llmlog.record("verify-fix", body, r.json(), time.monotonic() - t0)
     corpus.check_cut(r.json())
     obj = corpus.parse_json(r.json()["choices"][0]["message"]["content"])
