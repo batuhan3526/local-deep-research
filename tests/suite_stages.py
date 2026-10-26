@@ -177,5 +177,44 @@ log = (root3 / ".run.log").read_text(encoding="utf-8")
 check("a stage server that never comes up fails the run with a clear log line (resumable)",
       code == 1 and "stage switch" in log and "did not list" in log, log[-400:])
 
+# ---------- subprocess steps inherit the installed stage settings (module_cmd) ----------
+# A harvest step shells out to `python -m local_deep_research.corpus ...`; that child re-reads config. Without the
+# parent's effective settings in its env it would read [llm] from the file and, during the collect stage, talk to
+# the stopped report server. module_cmd must pass the installed settings as LDR_*.
+config.set_for_tests(config.Settings(llm_base_url="http://collect:1/v1", llm_model="fast", llm_concurrency=64,
+                                     llm_api_key="ck", llm_no_think=True))
+_, env = corpus.module_cmd("corpus", "verify", "x")
+check("module_cmd carries the installed LLM settings to the child as LDR_* (base_url, model, concurrency, key)",
+      env.get("LDR_LLM_BASE_URL") == "http://collect:1/v1" and env.get("LDR_LLM_MODEL") == "fast"
+      and env.get("LDR_LLM_CONCURRENCY") == "64" and env.get("LDR_LLM_API_KEY") == "ck"
+      and env.get("LDR_LLM_NO_THINK") == "True",
+      {k: v for k, v in env.items() if k.startswith("LDR_LLM_")})
+child = config.load(env={k: v for k, v in env.items() if k.startswith(("LDR_", "OPENAI_"))})
+check("a child loading that env resolves the same server, model and concurrency",
+      child.llm_base_url == "http://collect:1/v1" and child.llm_model == "fast" and child.llm_concurrency == 64
+      and child.llm_no_think is True, child)
+
+# ---------- graceful pause (STOP file) between phases ----------
+# Same signal as Ctrl-C: the run raises KeyboardInterrupt, the CLI turns it into a clean resumable stop (exit 130).
+seen_by.clear()
+pl3 = [mk(n) for n in ("profile", "plan", "harvest")]
+root4 = topic("pausable")
+(root4 / corpus.PAUSE_FILE).touch()  # pause requested before the run even starts the first phase
+try:
+    pipeline.run(root4, plist=pl3, sample=False)
+    paused = False
+except KeyboardInterrupt:
+    paused = True
+check("a STOP file pauses the run (KeyboardInterrupt, no phase ran, STOP consumed)",
+      paused and not seen_by and not (root4 / corpus.PAUSE_FILE).exists(), (paused, seen_by))
+log = (root4 / ".run.log").read_text(encoding="utf-8")
+check("the pause is logged as resumable", "stop requested" in log and "resumes here" in log, log[-200:])
+code = pipeline.run(root4, plist=pl3, sample=False)  # STOP consumed, so this resumes and finishes
+check("after the STOP is consumed, `ldr run` resumes and finishes", code == 0 and set(seen_by) >= {"profile", "plan"},
+      seen_by)
+(root4 / corpus.PAUSE_FILE).touch()
+check("corpus.pause_requested is true once then consumes the file",
+      corpus.pause_requested(root4) and not corpus.pause_requested(root4))
+
 config.set_for_tests(None)
 finish(RESULTS, TMP)

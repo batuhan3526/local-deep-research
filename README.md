@@ -314,6 +314,16 @@ ldr status <topic>       # see what is done and what comes next
 To redo a phase, delete its output file and run again. Fetched pages stay in the shared cache, so a rerun does not
 download them again.
 
+### Pausing and extending a run
+
+- **Pause cleanly.** `touch <topic>/research/STOP` (or press Ctrl-C). The run stops at the next clean boundary —
+  between harvest rounds or between phases, never mid-round — and `ldr run <topic>` resumes from there. The STOP
+  file is consumed, so the resumed run does not stop again at once.
+- **Add rounds** (mainly the `dinamik` profile, which keeps going while each round still yields and stops after two
+  weak rounds in a row, up to its round ceiling): raise the ceiling and resume with
+  `ldr run <topic> --max-rounds N`. `ldr status <topic>` shows the harvest yield per round, so you can see whether
+  sources are still plentiful before adding more.
+
 ## Troubleshooting
 
 **`LLM server unreachable`** — `ldr doctor` prints the URL it tried.

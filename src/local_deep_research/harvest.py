@@ -1913,6 +1913,10 @@ def cmd_run(a):
     used_q = {q["q"] for s in subs for q in s["queries"]} | \
         {q["q"] for s in subs for qs in s.get("gap_queries", {}).values() for q in qs}
     while rnd <= target:
+        if stage == "search" and corpus.pause_requested(root):  # a graceful stop asked between rounds
+            print(f"  stop requested (STOP file): harvest paused before round {rnd}; `ldr run` resumes here",
+                  flush=True)
+            raise KeyboardInterrupt
         rf = round_file(root, rnd)
         info = json.loads(rf.read_text(encoding="utf-8")) if rf.exists() and stage != "search" else {}
         prev = round_info(root, rnd - 1)

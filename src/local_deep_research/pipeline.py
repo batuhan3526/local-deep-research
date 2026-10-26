@@ -371,7 +371,7 @@ def run_lock(root):
 def run(root, profile_args=(), until=None, plist=None, concurrency=None, sample=True):
     """run every phase whose outputs are missing -> exit code (0 = done or stopped at `until`, 1 = a required
     phase failed). KeyboardInterrupt is logged and re-raised."""
-    from . import config, llmlog
+    from . import config, corpus, llmlog
     root = research_dir(root)
     if not (root / "BRIEF.md").exists():
         raise FileNotFoundError(f"no BRIEF.md in {root} (create the topic with `ldr new \"question\"`)")
@@ -396,6 +396,9 @@ def run(root, profile_args=(), until=None, plist=None, concurrency=None, sample=
                     if p.name == until:
                         break
                     continue
+                if corpus.pause_requested(root):  # a graceful stop asked between phases (touch <root>/STOP)
+                    log(root, f"stop requested (STOP file): paused before phase {p.name}; `ldr run` resumes here")
+                    raise KeyboardInterrupt
                 current[0] = p.name
                 try:
                     switch.enter(stages.stage_of(p.name, order))

@@ -314,6 +314,24 @@ def under(root, *parts):
     return p
 
 
+PAUSE_FILE = "STOP"  # `touch <research_dir>/STOP` to pause the run at the next round / phase boundary
+
+
+def pause_requested(root, consume=True):
+    """True when a STOP file sits in the research dir: a graceful-stop request the caller honours at a clean boundary
+    (between harvest rounds, between pipeline phases). Consumed by default so a later `ldr run` resumes instead of
+    pausing again at once."""
+    f = pathlib.Path(root) / PAUSE_FILE
+    if not f.exists():
+        return False
+    if consume:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return True
+
+
 def open_append(path):
     """Append handle that first terminates a torn last line (crash mid-write), so the next record stays parseable."""
     torn = False
@@ -703,12 +721,24 @@ def module_cmd(module, *args):
     path: the modules use package-relative imports. env puts this package's parent dir on PYTHONPATH when it is not
     an installed location (a checkout), so the child imports the same code as the parent."""
     import site
+    from . import config
     env = dict(os.environ)
     pkg_parent = str(pathlib.Path(__file__).resolve().parent.parent)
     sites = {os.path.realpath(p) for p in [*site.getsitepackages(), site.getusersitepackages()]}
     have = [x for x in env.get("PYTHONPATH", "").split(os.pathsep) if x]
     if os.path.realpath(pkg_parent) not in sites and pkg_parent not in have:
         env["PYTHONPATH"] = os.pathsep.join([pkg_parent, *have])
+    # Pass the parent's EFFECTIVE LLM settings to the child as LDR_* (they win over ldr.toml). Without this a child
+    # re-reads [llm] from the file, so during a stage switch (the [collect] / [report] model is installed in-process)
+    # it would talk to the wrong, possibly stopped, server. Empty values are left out so extract_* keeps inheriting.
+    s = config.get()
+    for k in ("base_url", "model", "api_key", "context", "concurrency", "no_think", "json_mode", "token_param",
+              "temperature", "timeout"):
+        env["LDR_LLM_" + k.upper()] = str(getattr(s, "llm_" + k))
+    for k in ("base_url", "model", "api_key"):
+        v = str(getattr(s, "extract_" + k) or "")
+        if v:
+            env["LDR_EXTRACT_" + k.upper()] = v
     return [sys.executable, "-X", "utf8", "-m", f"{__package__}.{module}", *map(str, args)], env
 
 
