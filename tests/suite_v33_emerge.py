@@ -332,6 +332,18 @@ pl, out = run_emerge(resp=lambda p: {"topics": [topic(next(j for j, t in cluster
                                                       aspects=[])]})
 check("emerge accepted without aspects: parent's 'completeness' check dropped",
       pl["subquestions"][-1].get("checks") == ["definitive"], pl["subquestions"][-1])
+# live 2026-10-27: queries answered as plain strings -> both accepted topics were silently not born
+pl, out = run_emerge(resp=lambda p: {"topics": [topic(next(j for j, t in clusters_of(p).items() if t == "T2"),
+                                                      queries=["regime switching features", "hmm regime detection",
+                                                               "regime features limitations"])]})
+check("emerge: plain-string queries are accepted (-> {q, kind}) and the topic is born",
+      len(out["born"]) == 1 and [q["q"] for q in pl["subquestions"][-1]["queries"]][:1] == ["regime switching features"]
+      and all(set(q) >= {"q", "kind"} for q in pl["subquestions"][-1]["queries"]), out)
+pl, out = run_emerge(resp=lambda p: {"topics": [topic(next(j for j, t in clusters_of(p).items() if t == "T2"),
+                                                      queries=["only one"])]})
+check("emerge: an accepted topic that is not born records why in its verdict",
+      out["born"] == [] and any("not born: 1 usable queries" in (c.get("verdict") or {}).get("why", "")
+                                for c in out["clusters"]), out)
 
 # ignored answers
 BAD = {"topics": [topic(0), topic(4), topic(99), topic("1"), topic(1, new=False), topic(2, new="true"),

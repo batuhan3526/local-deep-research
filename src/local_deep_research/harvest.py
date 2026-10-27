@@ -2053,8 +2053,15 @@ def emerge(root, pl, rnd, a):
         used.add(j)
         cands[j - 1]["verdict"] = {"new": t.get("new") is True, "why": corpus.inline(str(t.get("why") or ""), 200)}
         title, text = corpus.inline(str(t.get("title") or ""), 120), corpus.inline(str(t.get("text") or ""), 600)
-        qs = clean_queries(t.get("queries"), 20)[:per]
-        if t.get("new") is not True or not title or not text or len(qs) < 2 or len(out["born"]) >= room:
+        raw = t.get("queries") if isinstance(t.get("queries"), list) else []
+        # live 2026-10-27: the model answered plain strings instead of {"q", "kind"}; both births were dropped
+        qs = clean_queries([{"q": q} if isinstance(q, str) else q for q in raw], 20)[:per]
+        if t.get("new") is not True:
+            continue
+        miss = ("no title / text" if not title or not text else f"{len(qs)} usable queries" if len(qs) < 2 else
+                f"room for {room} new sub-questions this round" if len(out["born"]) >= room else "")
+        if miss:  # an accepted topic that is not born says why (it read as a silent "none")
+            cands[j - 1]["verdict"]["why"] = f"not born: {miss}; " + cands[j - 1]["verdict"]["why"]
             continue
         if corpus.injection_score(" ".join([title, text] + [q["q"] for q in qs])) > 0:
             # written from untrusted claims and stored as trusted plan text for every later prompt: no instructions
