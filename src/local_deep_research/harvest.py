@@ -94,7 +94,8 @@ UA = {"User-Agent": "local-deep-research-harvest/0.1 (local research collector)"
 JUNK = re.compile(r"(youtube|youtu\.be|facebook|instagram|tiktok|pinterest|twitter|x\.com|linkedin|netflix|amazon\."
                   r"|ebay|grokipedia|quora|numberanalytics|geeksforgeeks|analyticsvidhya|scribd|coursehero|tradingview\.com/symbols|zhihu|baidu|msn\.com|yahoo\.com/(quote|news))")
 PER_DOMAIN, PER_DOMAIN_OTHER, PER_DOMAIN_FARM = 6, 3, 1  # pages per round: trusted / neutral / farm domain
-STOP_RULE = "peak-v1"  # round-<n>.json "stop_rule": a weak streak counted under another rule is not carried over
+STOP_RULE = "peak-v2-novel"  # round-<n>.json "stop_rule": a weak streak counted under another rule is not carried over
+# (v3.4 "peak-v2-novel": yields net of paraphrase duplicates; was "peak-v1")
 YEAR = datetime.date.today().year
 ACADEMIC_SHARE = _S.academic_share  # share of a round's pages reserved for scholarly sources (select)
 CE_MODEL, CE_TOP, CE_W = _S.cross_encoder, 400, 0.2  # 400 real pairs ~6 s on 16 CPU threads (+~8 s load)
@@ -134,6 +135,12 @@ LANG_SHARE = 0.25  # share of a round's pages reserved for non-English results (
 LANG_Q = 2  # native queries per sub-question per language in round 1 (1 in later rounds)
 LANG_DROP = 2  # rounds without a grounded claim before a language is dropped
 MIN_YIELD = 0.35  # weak round: verified yield / minute < this x the best earlier round's
+NOVEL_SIM = 0.82  # v3.4: a new cluster this close (MiniLM cosine) to an older one is a paraphrase, not new information
+# calibrated 2026-10-27 on OSINT rounds 10-15 (9000 new clusters vs their closest older one): 0.75 mostly different
+# information, 0.80 about half the same, 0.82-0.85 mostly the same (Bellingcat founded 2014 by Eliot Higgins, Espectrosint
+# 1,000+ sources). corpus clusters at CLUSTER_SIM 0.86, so a new cluster is never closer than ~0.87 to an old one: the
+# duplicate band is 0.82-0.86 (~4% of new clusters). Tool lists that only overlap (Maltego, Shodan, theHarvester vs
+# Maltego, SpiderFoot, Shodan) sit at 0.71-0.81 and stay novel.
 # v3.3 per-sub-question plateau and emerging sub-questions (every round)
 PLATEAU, PLATEAU_ROUNDS = 0.35, 2  # new yield < PLATEAU x the sub-question's own best round, this many rounds in a row
 PLATEAU_W = 0.2  # page-quota weight of a plateaued sub-question (no queries; carried / linked pages still corroborate)
@@ -1957,11 +1964,13 @@ def lineage_cap(subs, w, share=None):
 
 def ref_ypm(root, rnd):
     """The weak-round reference (v3.3): the best yield/minute of rounds 1..rnd-1 (round 1's alone was the reference
-    before; it is often not the best round). Rounds before a yield_rebase are scaled by its factor."""
+    before; it is often not the best round). Rounds before a yield_rebase are scaled by its factor. v3.4: a round's
+    ypm_adj (paraphrase duplicates taken out) when it has one, else its ypm."""
     rb = yield_rebase(root) or {}
     best = 0.0
     for k in range(1, rnd):
-        y = float(round_info(root, k).get("ypm") or 0)
+        i = round_info(root, k)
+        y = float(i["ypm_adj"] if i.get("ypm_adj") is not None else i.get("ypm") or 0)
         if rb and k < int(rb.get("from_round", 10 ** 6)) <= rnd:
             y *= float(rb.get("factor", 1.0))
         best = max(best, y)
@@ -1969,10 +1978,15 @@ def ref_ypm(root, rnd):
 
 
 def sub_hist(root, s, rnd):
-    """[new yield of sub-question s in round k] for k from its birth round to rnd (missing rounds read as 0)."""
+    """[new yield of sub-question s in round k] for k from its birth round to rnd (missing rounds read as 0). v3.4:
+    a round's sub_new_adj (paraphrase duplicates taken out) when it has one, else its sub_new."""
     sid = str(s["id"])
-    return [float((round_info(root, k).get("sub_new") or {}).get(sid, 0) or 0)
-            for k in range(int(s.get("born") or 1), rnd + 1)]
+    out = []
+    for k in range(int(s.get("born") or 1), rnd + 1):
+        i = round_info(root, k)
+        h = i.get("sub_new_adj") if isinstance(i.get("sub_new_adj"), dict) else i.get("sub_new") or {}
+        out.append(float(h.get(sid, 0) or 0))
+    return out
 
 
 def plateaus(root, subs, rnd):
@@ -1989,6 +2003,172 @@ def plateaus(root, subs, rnd):
             out[s["id"]] = s["plateau"]
         else:
             s.pop("plateau", None)
+    return out
+
+
+# ---------- v3.4 novelty: paraphrase-duplicate clusters are not new information ----------
+CLAIM_EMB = "harvest/.claim_emb.npz"  # MiniLM vectors of claims.csv claim texts, keyed by sha1(text); grows each round
+
+
+def claim_vectors(root, texts, cache=None):
+    """(unit float32 vectors of texts, number embedded now). Vectors come from the CPU embedding model (the GPUs
+    serve the LLM) and are cached in harvest/.claim_emb.npz (float16) keyed by sha1 of the text: only texts not seen
+    before are looked up in verify's own claim-vector cache (corpus_vectors) and only what is not there either is
+    embedded (live: 77k claims cold = 32 min on a busy CPU; from verify's cache ~0). A cache built by another model is
+    rebuilt. cache: another file (read-only experiments)."""
+    import numpy as np
+    from . import rt_embed
+    f = pathlib.Path(cache) if cache else corpus.under(root, CLAIM_EMB)
+    model = rt_embed.CPU_MODEL
+    keys = [hashlib.sha1(t.encode("utf-8")).hexdigest() for t in texts]
+    ck, cv = np.array([], dtype="U40"), None
+    try:
+        with np.load(f, allow_pickle=False) as z:
+            if str(z["model"]) == model:
+                ck, cv = z["keys"], z["vecs"]
+    except (OSError, ValueError, KeyError):
+        pass  # no / unreadable / old cache: rebuilt below
+    idx = {k: i for i, k in enumerate(ck.tolist())}
+    by = dict(zip(keys, texts))
+    miss, todo = [k for k in by if k not in idx], []
+    if miss:
+        seed = corpus_vectors(root, model, miss)  # verify already embedded every claim with this model: reuse
+        todo = [k for k in miss if k not in seed]
+        if todo:
+            from .rt_embed import embed
+            ev = dict(zip(todo, np.asarray(embed([by[k] for k in todo], model=model, device="cpu"), dtype=np.float32)))
+        else:
+            ev = {}
+        new = np.asarray([seed[k] if k in seed else ev[k] for k in miss], dtype=np.float16)
+        idx.update((k, len(ck) + i) for i, k in enumerate(miss))
+        ck = np.concatenate([ck, np.array(miss, dtype="U40")])
+        cv = new if cv is None else np.vstack([cv, new])
+        buf = io.BytesIO()
+        np.savez(buf, keys=ck, vecs=cv, model=np.array(model))
+        corpus.atomic_write(f, buf.getvalue())
+    if not keys:
+        return np.zeros((0, 0 if cv is None else cv.shape[1]), dtype=np.float32), 0
+    v = cv[[idx[k] for k in keys]].astype(np.float32)
+    v /= np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
+    return v, len(todo)
+
+
+def corpus_vectors(root, model, keys):
+    """{sha1: vector} for the keys found in corpus verify's claim-vector cache (claims/.claimvec.<model tag>.npy +
+    .keys, sha1(text)[:20] per row, written by corpus.embed_cached), read-only and memory-mapped; {} when absent."""
+    import numpy as np
+    tag = hashlib.sha1(str(model).encode()).hexdigest()[:8]
+    try:
+        ks = (root / f"claims/.claimvec.{tag}.keys").read_text(encoding="utf-8").split()
+        vv = np.load(root / f"claims/.claimvec.{tag}.npy", mmap_mode="r")
+    except (OSError, ValueError):
+        return {}
+    pos = {k: i for i, k in enumerate(ks) if i < len(vv)}  # keys are written after the vectors: never past them
+    return {k: np.asarray(vv[pos[k[:20]]], dtype=np.float32) for k in keys if k[:20] in pos}
+
+
+def novelty_data(root, cache=None):
+    """The non-Düşük claims.csv clusters with their first round (min round of their URLs in sources.csv, as in
+    emerge()) and vectors, or None (no claims / sources yet). Read once, used for any number of rounds."""
+    import numpy as np
+    src_f, cl_f = root / "harvest/sources.csv", root / "claims/claims.csv"
+    if not src_f.exists() or not cl_f.exists():
+        return None
+    first = {}
+    for r in corpus.read_csv(src_f):
+        if str(r.get("round") or "").isdigit():
+            first[r["url"]] = min(int(r["round"]), first.get(r["url"], 10 ** 6))
+    rows, fr = [], []
+    for r in corpus.read_csv(cl_f):
+        rs = [first[u] for u in (r.get("urls") or "").split() if u in first]
+        if r.get("confidence") != "Düşük" and rs and (r.get("claim") or "").strip():
+            rows.append(r); fr.append(min(rs))
+    v, n_emb = claim_vectors(root, [r["claim"] for r in rows], cache)
+    return {"rows": rows, "first": np.array(fr, dtype=int), "v": v, "embedded": n_emb}
+
+
+def novelty(root, subs, rnd, cache=None, data=None, sim=None):
+    """v3.4: how much of round rnd's new verified yield is new information. The clusters first seen in round rnd
+    (non-Düşük) are novel if their best cosine to the clusters first seen before rnd is < NOVEL_SIM, else a
+    paraphrase-duplicate of known information ("tools include Maltego, Shodan, theHarvester" again with SpiderFoot).
+    An older cluster upgraded this round (Orta -> Yüksek) is not new, so never a duplicate: its yield stays counted.
+    dup_yield = row_yield sum of the duplicates, per sub-question too (assigned like packs(): argmax cosine to the
+    sub-question texts, >= PACK_MIN_SIM). Returns {new, novel, share, dup_yield, sub_dup_yield, sim} or None."""
+    import numpy as np
+    thr = NOVEL_SIM if sim is None else float(sim)
+    d = data if data is not None else novelty_data(root, cache)
+    if d is None:
+        return None
+    fr, v = d["first"], d["v"]
+    new, old = np.flatnonzero(fr == rnd), np.flatnonzero(fr < rnd)
+    best = np.full(len(new), -1.0, dtype=np.float32)
+    if len(new) and len(old):
+        vo = v[old]
+        for i in range(0, len(new), 2048):  # 2048 x 77k float32 ~ 0.6 GB at a time
+            best[i:i + 2048] = (v[new[i:i + 2048]] @ vo.T).max(1)
+    dup = best >= thr
+    ys = np.array([row_yield(d["rows"][i]) for i in new], dtype=float)
+    act = [s for s in subs if int(s.get("born") or 1) <= rnd]  # the sub-questions round rnd's packs() had
+    sub_dup = {str(s["id"]): 0.0 for s in act}
+    if act and dup.any():
+        from .rt_embed import embed
+        from . import rt_embed
+        sv = np.asarray(embed([s["text"] for s in act], model=rt_embed.CPU_MODEL, device="cpu"), dtype=np.float32)
+        sv /= np.linalg.norm(sv, axis=1, keepdims=True) + 1e-9
+        ss = v[new[dup]] @ sv.T
+        b = ss.argmax(1)
+        for j, s in enumerate(act):
+            m = (b == j) & (ss[:, j] >= PACK_MIN_SIM)
+            sub_dup[str(s["id"])] = round(float(ys[dup][m].sum()), 2)
+    n, m = int(len(new)), int((~dup).sum())
+    return {"new": n, "novel": m, "share": round(m / n, 4) if n else None, "dup_yield": round(float(ys[dup].sum()), 2),
+            "sub_dup_yield": sub_dup, "sim": thr}
+
+
+def apply_novelty(info, nov):
+    """info (a round-<n>.json dict with new_yield, minutes, sub_new) += novelty, new_yield_adj, ypm_adj, sub_new_adj:
+    the paraphrase-duplicate yield taken out. The weak rule, ref_ypm and plateaus() read the adjusted values."""
+    info["novelty"] = nov
+    mins = max(0.01, float(info.get("minutes") or sum((info.get("t") or {}).values()) or 0.01))
+    y = round(float(info.get("new_yield") or 0) - nov["dup_yield"], 2)
+    info.update(new_yield_adj=y, ypm_adj=round(y / mins, 3),
+                sub_new_adj={k: round(float(x or 0) - float(nov["sub_dup_yield"].get(k, 0) or 0), 2)
+                             for k, x in (info.get("sub_new") or {}).items()})
+    return info
+
+
+def novelty_line(nov):
+    pct = f"{100 * nov['share']:.0f}%" if nov.get("share") is not None else "-"
+    return (f"novelty: {nov['novel']}/{nov['new']} new clusters novel ({pct}), paraphrase-duplicate yield "
+            f"-{nov['dup_yield']:g}")
+
+
+def backfill_novelty(root, subs, force=False, cache=None, write=True, log=print):
+    """Novelty for every finished round (round-<k>.json with "ypm") that lacks "ypm_adj" (all with force): writes
+    novelty / new_yield_adj / ypm_adj / sub_new_adj into it, so a resumed run compares against an adjusted history.
+    Uses today's claims.csv (later corroboration upgrades included). Safe to re-run: done rounds are skipped and the
+    values are a deterministic function of the corpus. Returns {round: novelty}."""
+    ks = sorted(int(m_.group(1)) for f in (root / "harvest").glob("round-*.json")
+                if (m_ := re.fullmatch(r"round-(\d+)\.json", f.name)))
+    todo = [k for k in ks if "ypm" in (i := round_info(root, k)) and (force or "ypm_adj" not in i)]
+    if not todo:
+        return {}
+    t0 = time.time()
+    d = novelty_data(root, cache)
+    if d is None:
+        return {}
+    log(f"  novelty backfill: rounds {todo[0]}-{todo[-1]} ({len(todo)}), {len(d['rows'])} grounded clusters, "
+        f"{d['embedded']} newly embedded", flush=True)
+    out = {}
+    for k in todo:
+        info = round_info(root, k)
+        nov = novelty(root, subs, k, data=d)
+        apply_novelty(info, nov)
+        if write:
+            corpus.atomic_write(round_file(root, k), json.dumps(info, ensure_ascii=False))
+        out[k] = nov
+        log(f"  round {k}: {novelty_line(nov)}; yield/min {info.get('ypm')} -> {info['ypm_adj']}", flush=True)
+    log(f"  novelty backfill done in {(time.time() - t0) / 60:.1f} min", flush=True)
     return out
 
 
@@ -2147,6 +2327,14 @@ def cmd_run(a):
     subs = pl["subquestions"]
     classify(root, pl)
     st = load_state(root)
+    last = st["round"] if st["stage"] == "done" else st["round"] - 1
+    if last >= 1 and "ypm" in round_info(root, last) and "ypm_adj" not in round_info(root, last):
+        print(f"novelty: round {last} has no ypm_adj (run started before v3.4): backfilling the finished rounds",
+              flush=True)
+        try:  # the stop rule compares against an adjusted history; without it each round falls back to its ypm
+            backfill_novelty(root, subs)
+        except Exception as e:  # never worth failing the harvest over
+            print(f"  novelty backfill failed: {str(e)[:160]}", file=sys.stderr)
     until = int(getattr(a, "until", 0) or 0)  # absolute last round (driver restarts must not add rounds)
     if st["stage"] == "done":  # new rounds after the last finished one
         if until:
@@ -2323,11 +2511,22 @@ def cmd_run(a):
                         sub_new={k: round(v - float(pc.get(k, 0) or 0), 2) for k, v in sub_cum.items()},
                         judged=vs.get("judged"), corr_early_stop=bool(vs.get("early_stop")),
                         bonus_pages=min(a.pages // 2, saved // PAIRS_PER_PAGE))
+            nov = None
+            try:  # v3.4: paraphrase duplicates of known clusters are not new information
+                nov = novelty(root, subs, rnd)
+            except Exception as e:  # never worth failing the harvest over; the raw yields stand
+                print(f"  novelty failed: {str(e)[:160]}", file=sys.stderr)
+            if nov:
+                apply_novelty(info, nov)
+            ypm_e = info.get("ypm_adj", ypm)  # the yield/min the stop rule judges
             fails = {s["id"]: [c for c, ok in s["check_status"][str(rnd)]["pass"].items() if not ok] for s in subs}
             print(f"  round {rnd}: +{n_new} claims, grounded clusters {before} -> {after}, Yüksek {high}; verified "
                   f"yield +{new_y} in {mins:.1f} min = {ypm}/min (cumulative {info['cum_ypm']}/min), {gpm} grounded "
                   f"claims/min; failing checks {fails}", flush=True)
-            r1 = ypm if rnd == 1 else ref_ypm(root, rnd)  # v3.3: the best earlier round, not round 1
+            if nov:
+                print(f"  {novelty_line(nov)}: new-information yield +{info['new_yield_adj']} = {ypm_e}/min",
+                      flush=True)
+            r1 = ypm_e if rnd == 1 else ref_ypm(root, rnd)  # v3.3: the best earlier round, not round 1
             corpus.atomic_write(rf, json.dumps(info, ensure_ascii=False))  # plateaus() reads this round's sub_new
             flat = plateaus(root, subs, rnd)
             save_plan(root, pl)
@@ -2335,11 +2534,11 @@ def cmd_run(a):
             info["stop_rule"] = STOP_RULE
             all_flat = early and rnd > 1 and subs and len(flat) == len(subs)
             all_pass = early and getattr(a, "stop_on_pass", True) and not any(fails.values())
-            low = rnd > 1 and ratio > 0 and r1 > 0 and ypm < ratio * r1
+            low = rnd > 1 and ratio > 0 and r1 > 0 and ypm_e < ratio * r1
             # a weak round = the information is drying up; the harvest stops after `patience` weak rounds in a row
             # (dinamik: 2, so one unlucky round does not end it), or at the wall-clock ceiling (max_hours)
             weak = ("every sub-question plateaued" if all_flat else
-                    f"yield/min {ypm} < {ratio} x best round ({r1})" if low else "")
+                    f"yield/min {ypm_e} < {ratio} x best round ({r1})" if low else "")
             if flat:
                 print("  plateaued sub-questions: " + ", ".join(f"S{k} (since round {v})" for k, v in flat.items())
                       + f" ({len(flat)}/{len(subs)})", flush=True)
@@ -2362,10 +2561,12 @@ def cmd_run(a):
             else:
                 note_w = ""
             note = (f"DUR: {why}" if why and rnd < target else
-                    f"devam: verim/dk {ypm} = {ypm / r1:.2f} x en iyi tur" if r1 > 0 and rnd < target else
-                    f"son tur ({rnd}/{target})" + (f"; verim/dk {ypm} = {ypm / r1:.2f} x en iyi tur" if r1 > 0 and rnd > 1 else "")
+                    f"devam: verim/dk {ypm_e} = {ypm_e / r1:.2f} x en iyi tur" if r1 > 0 and rnd < target else
+                    f"son tur ({rnd}/{target})" + (f"; verim/dk {ypm_e} = {ypm_e / r1:.2f} x en iyi tur" if r1 > 0 and rnd > 1 else "")
                     if rnd >= target else "devam (tur 1 verimi yok, oran kuralı kapalı)")
             note += note_w
+            if nov and nov.get("share") is not None:
+                note += f"; yenilik %{100 * nov['share']:.0f} (tekrar verimi -{nov['dup_yield']:g})"
             if flat:
                 note += f"; plato: {', '.join(f'S{k}' for k in flat)} ({len(flat)}/{len(subs)})"
             born = [s_ for s_ in subs if s_.get("origin") and s_.get("born") == rnd]
@@ -2583,6 +2784,11 @@ def main():
             p.add_argument("--again", action="store_true")
     p = sub.add_parser("plan"); p.add_argument("root", type=pathlib.Path); p.add_argument("--subs", type=int, default=6)
     p.add_argument("--per-sub", type=int, default=14)
+    p = sub.add_parser("novelty", help="v3.4: paraphrase-duplicate yield of the finished rounds -> round-<k>.json")
+    p.add_argument("root", type=pathlib.Path)
+    p.add_argument("--force", action="store_true", help="recompute rounds that already have ypm_adj")
+    p.add_argument("--dry-run", action="store_true", help="print only; write nothing but the embedding cache")
+    p.add_argument("--cache", type=pathlib.Path, help=f"embedding cache file (default <root>/{CLAIM_EMB})")
     p = sub.add_parser("profile"); p.add_argument("root", type=pathlib.Path)
     p.add_argument("--profile", default=None, help="normal|derin|maksimum|dinamik (fast|deep|max|dynamic)")
     p.add_argument("--langs", default=None, help=f"extra search languages: 'de,zh,ja', 'all' or 'none' "
@@ -2601,7 +2807,12 @@ def main():
     if a.cmd in ("run", "gap", "plan"):  # raw LLM log + raw page bytes into the run's dataset/ (v3.1)
         corpus.llmlog.set_root(a.root)
         corpus.RAW_DIR[0] = a.root / "dataset/raw"
-    if a.cmd == "plan":
+    if a.cmd == "novelty":
+        pl = json.loads((a.root / "harvest/plan.json").read_text(encoding="utf-8"))
+        out = backfill_novelty(a.root, pl["subquestions"], force=a.force, cache=a.cache, write=not a.dry_run)
+        if not out:
+            print("novelty: every finished round already has ypm_adj (--force recomputes)")
+    elif a.cmd == "plan":
         print(json.dumps(plan(a.root, a.subs, a.per_sub), ensure_ascii=False, indent=1))
     elif a.cmd == "profile":
         try:

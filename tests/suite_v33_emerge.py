@@ -538,8 +538,8 @@ check("run A: rising yield/min (1.5 -> 3 -> 4.5 -> 6) on a growing corpus: 4 rou
       [x["ypm"] for x in ia] == [1.5, 3.0, 4.5, 6.0] and all(x["weak_streak"] == 0 and "stop" not in x for x in ia)
       and json.loads((rootA / "harvest/state.json").read_text(encoding="utf-8"))["round"] == 4,
       [(x["ypm"], x.get("weak_streak"), x.get("stop")) for x in ia])
-check("run A: round json carries stop_rule peak-v1 and an empty plateau map; ROUNDS.md compares to the best round",
-      all(x["stop_rule"] == harvest.STOP_RULE == "peak-v1" and x["plateau"] == {} for x in ia)
+check("run A: round json carries stop_rule peak-v2-novel and an empty plateau map; ROUNDS.md compares to the best round",
+      all(x["stop_rule"] == harvest.STOP_RULE == "peak-v2-novel" and x["plateau"] == {} for x in ia)
       and "x en iyi tur" in (rootA / "harvest/ROUNDS.md").read_text(encoding="utf-8")
       and "15%" not in (rootA / "harvest/ROUNDS.md").read_text(encoding="utf-8"), ia[1])
 check("run A: emergence ran once per finished round (1, 2, 3) and is stored in that round's json",
