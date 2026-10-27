@@ -357,10 +357,16 @@ check("emerge: a non-list 'topics' answer -> no births, no crash", out["born"] =
 pl, out = run_emerge(resp=["not", "a", "dict"])
 check("emerge: a non-dict answer -> no births, no crash", out["born"] == [] and len(pl["subquestions"]) == 2)
 
-# per-round limit and total cap
+# no per-round limit, only the total cap
 pl, out = run_emerge(resp={"topics": [topic(1), topic(2), topic(3)]})
-check("emerge: at most EMERGE_NEW (2) new sub-questions a round, ids 6 and 7",
-      [b["id"] for b in out["born"]] == [6, 7] and len(pl["subquestions"]) == 4, out["born"])
+check("emerge: 3 accepted, total cap 2.0 x 2 base = 4 -> 2 born (ids 6, 7), the third says 'not born: room'",
+      [b["id"] for b in out["born"]] == [6, 7] and len(pl["subquestions"]) == 4
+      and any("not born: room" in (c.get("verdict") or {}).get("why", "") for c in out["clusters"]), out)
+_cap = harvest.EMERGE_CAP; harvest.EMERGE_CAP = 3.0
+pl, out = run_emerge(resp={"topics": [topic(1), topic(2), topic(3)]})
+harvest.EMERGE_CAP = _cap
+check("emerge: no per-round limit (2026-10-27) -> all 3 accepted topics born when the total cap has room",
+      [b["id"] for b in out["born"]] == [6, 7, 8] and len(pl["subquestions"]) == 5, out["born"])
 child = {"id": 6, "title": "c", "text": "T12 child", "queries": [{"q": "c", "kind": "docs"}], "parent": 1, "born": 3,
          "origin": {"round": 2, "claims": M, "domains": D}}
 pl3 = copy.deepcopy(BASE_PL); pl3["subquestions"].append(dict(child))

@@ -143,7 +143,9 @@ EMERGE_ROUNDS = 2  # emerging topics are looked for in the claims first seen in 
 # mostly off-topic drift (ML benchmark papers from 4-11 domains, cohesion ~0.45-0.50); domains and cohesion remove it.
 # Coverage compares to the sub-question texts AND their aspects (text alone re-proposed existing aspects every round).
 EMERGE_MIN, EMERGE_DOMS, EMERGE_COH, EMERGE_FAR = 80, 15, 0.58, 0.55  # cluster size, domains, cohesion, max coverage
-EMERGE_ASK, EMERGE_NEW, EMERGE_CAP = 5, 2, 2.0  # candidates to the LLM, new subs per round, max subs = cap x the plan's
+# no per-round birth limit (user decision 2026-10-27: every accepted topic is born; a limit of 2 left accepted ones
+# waiting); only the total cap and the candidate count of one LLM call remain
+EMERGE_ASK, EMERGE_CAP = 10, 2.0  # candidates to the LLM per round, max sub-questions = cap x the plan's
 # measured 2026-10-18 (27B, 55% power, concurrency 64): extraction 256 chunks / 551 s, 2.1 chunks per page with text,
 # corroboration 3000 pairs / 2083 s at 48 in flight, search + select + fetch ~4 min for 84 queries / 160 pages
 EST = {"q_min": 0.025, "page_min": 0.01, "chunks_pp": 2.1, "chunk_s": 2.15, "pair_s": 0.69, "verify_min": 1.0}
@@ -1970,7 +1972,7 @@ def emerge(root, pl, rnd, a):
     the last EMERGE_ROUNDS rounds are embedded and clustered (KMeans, ~150 claims a cluster); a cluster with >=
     EMERGE_MIN claims from >= EMERGE_DOMS domains, cohesion >= EMERGE_COH and coverage (best cosine of its centroid to
     a sub-question's text or aspect) <= EMERGE_FAR is a candidate; the best EMERGE_ASK go to one LLM call, which
-    keeps the in-scope, distinct ones (<= EMERGE_NEW a round, <= EMERGE_CAP x the plan's sub-questions in all).
+    keeps the in-scope, distinct ones (no per-round limit; <= EMERGE_CAP x the plan's sub-questions in all).
     A new sub-question gets the next id, "parent" (the sub-question most of its claims sat under), "born" = rnd + 1,
     the parent's checks and its seed queries as round rnd + 1's gap queries. Returns a summary dict for round-<rnd>.json."""
     subs = pl["subquestions"]
@@ -1980,7 +1982,7 @@ def emerge(root, pl, rnd, a):
     if done:  # a crash after the plan was saved, before round-<rnd>.json got "emerge": no second set of births
         return {"candidates": 0, "born": [{"id": s["id"], "title": s["title"], "parent": s.get("parent")} for s in done],
                 "why": "resumed"}
-    room = min(EMERGE_NEW, int(EMERGE_CAP * base_n) - len(subs))
+    room = int(EMERGE_CAP * base_n) - len(subs)
     src_f, cl_f = root / "harvest/sources.csv", root / "claims/claims.csv"
     if room <= 0 or not src_f.exists() or not cl_f.exists():
         return {"candidates": 0, "born": [], "why": "cap reached" if room <= 0 else "no data"}
