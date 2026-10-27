@@ -138,6 +138,7 @@ MIN_YIELD = 0.35  # weak round: verified yield / minute < this x the best earlie
 PLATEAU, PLATEAU_ROUNDS = 0.35, 2  # new yield < PLATEAU x the sub-question's own best round, this many rounds in a row
 PLATEAU_W = 0.2  # page-quota weight of a plateaued sub-question (no queries; carried / linked pages still corroborate)
 EMERGE_W = 1.5  # weight of a sub-question in the round it is born
+LINEAGE_SHARE = 0.25  # max share of a round's weight for one lineage (a sub-question + all born from it), any topic
 EMERGE_ROUNDS = 2  # emerging topics are looked for in the claims first seen in the last this many rounds
 # calibrated 2026-10-27 on OSINT rounds 7-10 (MiniLM, ~150 claims a cluster): clusters far from every sub-question are
 # mostly off-topic drift (ML benchmark papers from 4-11 domains, cohesion ~0.45-0.50); domains and cohesion remove it.
@@ -1904,7 +1905,54 @@ def sub_weights(subs, prev, rnd):
             out[s["id"]] = PLATEAU_W
         elif int(s.get("born") or 1) == rnd:
             out[s["id"]] = EMERGE_W
-    return out
+    return lineage_cap(subs, out)
+
+
+def lineages(subs):
+    """{root sub id: [ids]}: a sub-question and everything born from it (parent chains) form one lineage."""
+    by = {s["id"]: s for s in subs}
+    out = collections.defaultdict(list)
+    for s in subs:
+        r, seen = s, {s["id"]}
+        while r.get("parent") in by and r["parent"] not in seen:  # a broken / cyclic chain stops at the last good id
+            seen.add(r["parent"]); r = by[r["parent"]]
+        out[r["id"]].append(s["id"])
+    return dict(out)
+
+
+def lineage_cap(subs, w, share=None):
+    """v3.3, topic-agnostic: no lineage (sub-question + its descendants) gets more than LINEAGE_SHARE of the round's
+    total weight; an over-share lineage is scaled down to exactly that share (its members keep their ratios), the rest
+    keep theirs. Repeated until stable. Only with more than 1 / share lineages (4 lineages at 25% each is the even split:
+    a cap there only distorts) and while the uncapped rest has weight."""
+    share = LINEAGE_SHARE if share is None else share
+    if not w or share <= 0:
+        return w
+    groups = [ids for ids in lineages(subs).values() if any(i in w for i in ids)]
+    if len(groups) * share <= 1:
+        return w
+    w = dict(w)
+    capped = set()
+    for _ in range(len(groups)):
+        tot = sum(w.values())
+        over = [j for j, ids in enumerate(groups) if j not in capped and sum(w.get(i, 0) for i in ids) > share * tot + 1e-9]
+        if not over:
+            break
+        capped |= set(over)
+        if len(capped) * share >= 1:
+            break
+        rest = sum(w.get(i, 0) for j, ids in enumerate(groups) if j not in capped for i in ids)
+        if rest <= 0:
+            break
+        target = share / (1 - len(capped) * share) * rest  # each capped lineage's weight for exactly `share`
+        for j in capped:
+            ids = groups[j]
+            have = sum(w.get(i, 0) for i in ids)
+            if have > 0:
+                for i in ids:
+                    if i in w:
+                        w[i] = round(w[i] * target / have, 3)
+    return w
 
 
 def ref_ypm(root, rnd):

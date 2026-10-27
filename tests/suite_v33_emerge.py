@@ -649,4 +649,22 @@ check("run C resumed at round 2's search: emerge not called again, sub_base read
 harvest.emerge = REAL_EMERGE
 harvest.time = time
 
+# ---------- lineage cap (topic-agnostic) ----------
+LS = [{"id": i, "text": f"s{i}"} for i in range(1, 9)] + [{"id": 9, "text": "c", "parent": 5}, {"id": 10, "text": "g", "parent": 9},
+                                                       {"id": 11, "text": "x", "parent": 99}]
+check("lineages: parent chains -> one lineage per root (grandchild included, unknown parent = own root)",
+      harvest.lineages(LS)[5] == [5, 9, 10] and harvest.lineages(LS)[11] == [11] and len(harvest.lineages(LS)) == 9,
+      harvest.lineages(LS))
+W = {i: 1.0 for i in range(1, 12)}; W.update({5: 2.0, 9: 2.0, 10: 2.0})
+C = harvest.lineage_cap(LS, W)
+share = lambda w, ids: sum(w[i] for i in ids) / sum(w.values())  # noqa: E731
+check("lineage cap: a lineage with 6/14 = 43% of the weight is scaled to exactly 25%, ratios inside kept, others untouched",
+      abs(share(C, [5, 9, 10]) - 0.25) < 0.01 and C[5] == C[9] == C[10] and all(C[i] == 1.0 for i in (1, 2, 3, 11)), C)
+W2 = {i: 1.0 for i in range(1, 12)}; W2.update({5: 0.5, 9: 0.5, 10: 0.5})
+check("lineage cap: no lineage over the share -> weights unchanged; empty / None weights pass through",
+      harvest.lineage_cap(LS, W2) == W2
+      and harvest.lineage_cap(LS, None) is None and harvest.lineage_cap(LS, {}) == {})
+check("lineage cap: <= 1/share lineages (2 here) -> left as is (a cap would only distort), no crash",
+      harvest.lineage_cap([{"id": 1, "text": "a"}, {"id": 2, "text": "b"}], {1: 3.0, 2: 1.0}) == {1: 3.0, 2: 1.0})
+
 finish(RESULTS, SCRATCH)
