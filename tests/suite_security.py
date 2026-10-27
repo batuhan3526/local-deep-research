@@ -361,6 +361,8 @@ def fake_llm_json(prompt, max_tokens=6000, system=None):
         return {"subquestions": [{"id": 1, "checks": ["definitive", "plurality"]}, {"id": 2, "checks": ["definitive"]}]}
     if "Interim summary" in prompt:  # v3.1 interim report summary, not a gap call
         return {"bullets": []}
+    if "blind-spot gaps" in prompt:  # v3.4 blind-spot probe, not a gap call (suite_v34_probe tests it)
+        return {"gaps": []}
     cnt["gap"] += 1
     check("gap prompt carries wrapped, sanitised claims", "<<<CLAIMS-" in prompt and "<|im_start|>" not in prompt)
     return {"gaps": ["x"], "queries": [{"q": f"gap query {cnt['gap']}", "kind": "practitioner"}]}
