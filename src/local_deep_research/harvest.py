@@ -3043,7 +3043,7 @@ def cmd_run(a):
                 est = round_minutes(len(queries), n_pages, mp or corpus.CORR_MAX_PAIRS)
                 log_round(root, rnd, eta=f"tur 1 ≈ {est:.0f} dk, {target} tur ≈ {est * target * 0.8:.0f} dk "
                                          f"(tahmin: EST sabitleri, ölçüm yok)")
-            cands = search_all(queries) if queries else []
+            cands = search_all(queries)
             carried = [dict(x) for x in _dicts(prev.get("carry"))]  # last round's unselected good candidates
             if rnd > 1 and prev and "carry" not in prev:  # a round run before carry-over existed: its candidates
                 carried = search_all(past_queries(pl, rnd - 1))  # again, from the search cache (no new requests

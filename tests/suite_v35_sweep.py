@@ -212,7 +212,7 @@ check("sweep verify: the priority file holds the single-source clusters (sweep_p
 sw = json.loads((root / "harvest/sweep.json").read_text(encoding="utf-8"))
 r2 = ri(root, 2)
 check("sweep pool round: round 2 ran, searched nothing, selected only carried pages",
-      RUN["searched"] == [] and r2["queries"] == 0 and r2["sel"]
+      all(q == [] for q in RUN["searched"]) and r2["queries"] == 0 and r2["sel"]
       and all(c["url"] in carry for c in r2["sel"] if c.get("src") != "link"), (RUN["searched"], r2.get("sel")))
 check("sweep: harvest/sweep.json records the verify part (judged, lifted, yields) and the pool round",
       sw["verify"]["judged"] == 77 and sw["verify"]["lifted"] == 3 and "yield_after" in sw["verify"]
@@ -221,8 +221,10 @@ r1b = ri(root, 1)  # emerge / probe for a round are stored in the finished round
 check("sweep pool round: no emerge / probe though the caller allowed them (a pool round does not grow the plan)",
       "emerge" not in r1b and "probe" not in r1b and S.no_emerge is True and S.no_probe is True, list(r1b))
 n_corpus = len(RUN["corpus"])
+n_searched = len(RUN["searched"])
 harvest.cmd_sweep(S)
-check("sweep: idempotent (a second run does nothing)", len(RUN["corpus"]) == n_corpus and RUN["searched"] == []
+check("sweep: idempotent (a second run does nothing)", len(RUN["corpus"]) == n_corpus
+      and len(RUN["searched"]) == n_searched
       and harvest.load_state(root)["round"] == 2)
 S.again = True
 harvest.cmd_sweep(S)
