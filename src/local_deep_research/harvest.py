@@ -2757,14 +2757,17 @@ JUDGE_WORDS = 0.5  # and the LLM's pick must share >= this share of the proposal
 # "already asked?" it said yes for all 8 test proposals, a geolocation deep dive "asked" by a question that only lists
 # geolocation among 15 methods; asked for the relation it answered "aspect" for all 8. The word test on the same 8:
 # real duplicates 0.50-0.67, new topics 0.00-0.33.
+JUDGE_STEM = 4  # live round 28: "Technical Architecture and Scalability" (LLM: S18, aspect "Scale and performance") and
+# "conflict zone investigations" (aspect "Tooling for conflict-zone OSINT") passed as new with whole words compared
+# one title / aspect at a time; 4-letter stems over title + aspects together catch both
 _JW_STOP = frozenset("a an the and or of for in on to with by from into using use based their its how what which why "
                      "when is are vs versus".split())
 
 
 def title_words(t):
-    """distinctive-word candidates of a title: lower-case words of 3+ letters, crude plural fold, no stop words"""
-    return {w[:-1] if len(w) > 4 and w.endswith("s") else w for w in re.findall(r"[a-z0-9]+", str(t).lower())
-            if len(w) > 2 and w not in _JW_STOP}
+    """distinctive-word candidates of a title: lower-case words of 3+ letters, no stop words, cut to their first
+    JUDGE_STEM letters (a crude, language-light stem: scalability / scale, investigations / investigation)"""
+    return {w[:JUDGE_STEM] for w in re.findall(r"[a-z0-9]+", str(t).lower()) if len(w) > 2 and w not in _JW_STOP}
 
 
 def field_words(subs):
@@ -2774,18 +2777,20 @@ def field_words(subs):
 
 
 def word_overlap(title, sub, fw=frozenset()):
-    """share of the proposal title's distinctive words found in the sub-question's title or in one of its aspects"""
+    """share of the proposal title's distinctive words found in the sub-question's title and aspects together"""
     want = title_words(title) - set(fw)
     if not want:
         return 0.0
-    return max(len(want & title_words(r)) / len(want) for r in [sub["title"]] + list(sub.get("aspects") or []))
+    have = set().union(*(title_words(r) for r in [sub["title"]] + list(sub.get("aspects") or [])))
+    return len(want & have) / len(want)
 
 
 def same_as(subs, cands, near=JUDGE_NEAR):
     """v3.5 birth judge: {candidate index: (sub id, "relation: why")} for the candidates ({title, text(, depth)}) an
     existing sub-question already asks for. The LLM names the closest shown sub-question and the relation; JUDGE_DUP
     decides which relations make a duplicate (a depth candidate from probe_depth: subject / aspect only) and the pick
-    must pass word_overlap >= JUDGE_WORDS (the LLM alone over-matched, see JUDGE_WORDS). One LLM call shows each candidate with its `near` closest sub-questions (MiniLM over text and
+    must be confirmed by word_overlap >= JUDGE_WORDS with one of the shown sub-questions, which is then the one named
+    (the LLM alone over-matched, see JUDGE_WORDS). One LLM call shows each candidate with its `near` closest sub-questions (MiniLM over text and
     aspects); only an id shown with that candidate counts. {} without candidates / sub-questions or on any failure
     (the cosine restatement checks still apply)."""
     import numpy as np
@@ -2828,9 +2833,12 @@ def same_as(subs, cands, near=JUDGE_NEAR):
         rel = str(t.get("relation") or "").strip().lower()
         if type(i) is int and 1 <= i <= len(cands) and type(sid) is int and sid in shown[i - 1] and i - 1 not in out \
                 and rel in JUDGE_DUP["depth" if cands[i - 1].get("depth") else "general"]:
-            wo = word_overlap(cands[i - 1]["title"], by[sid], fw)
+            # the LLM says "duplicate"; the words decide of which shown sub-question (its pick first on a tie) -- live
+            # round 28 it named the Ukraine-war sub-question for "conflict zone investigations", not the one whose
+            # aspect is "Tooling for conflict-zone OSINT"
+            wo, best = max((word_overlap(cands[i - 1]["title"], by[k], fw), k == sid, k) for k in shown[i - 1])[::2]
             if wo >= JUDGE_WORDS:
-                out[i - 1] = (sid, f"{rel}, words {wo:.2f}: " + corpus.inline(str(t.get("why") or ""), 160))
+                out[i - 1] = (best, f"{rel}, words {wo:.2f}: " + corpus.inline(str(t.get("why") or ""), 160))
     return out
 
 

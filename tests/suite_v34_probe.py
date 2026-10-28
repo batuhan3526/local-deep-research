@@ -523,14 +523,21 @@ check("same_as: list_item duplicates a general proposal, not a depth one (depth:
 LLM["judge"] = {"verdicts": [{"cand": 1, "same_as": 1, "relation": "subject"}]}
 check("same_as: the LLM's pick must share JUDGE_WORDS of the title's distinctive words with its title / an aspect",
       harvest.same_as(J4, [{"title": "Unrelated wording entirely", "text": "T0 x"}]) == {})
-check("word_overlap / field_words: title or one aspect, never the text; plan-wide words are not distinctive",
+FW = harvest.field_words([{"title": "OSINT a"}, {"title": "OSINT b"}, {"title": "c"}])
+check("word_overlap / field_words: title + aspects together, never the text; 4-letter stems; plan-wide words out",
       harvest.word_overlap("Username Enumeration Tools", {"title": "Identifier Pivoting", "text": "username enumeration",
                                                           "aspects": ["Username enumeration across platforms"]}) == 2 / 3
       and harvest.word_overlap("Geolocation", {"title": "Collection methods", "text": "geolocation, crypto, ...",
                                                "aspects": ["Search engines"]}) == 0.0
-      and harvest.field_words([{"title": "OSINT a"}, {"title": "OSINT b"}, {"title": "c"}]) == {"osint"}
-      and harvest.word_overlap("OSINT Geolocation Methods", {"title": "Automated Image and Video Geolocation"},
-                               {"osint"}) == 0.5)
+      and FW == {"osin"}
+      and harvest.word_overlap("OSINT Geolocation Methods", {"title": "Automated Image and Video Geolocation"}, FW) == 0.5
+      and harvest.word_overlap("Technical Architecture and Scalability",
+                               {"title": "Tooling engineering and architecture", "aspects": ["Scale and performance"]})
+      == 2 / 3)
+LLM["judge"] = {"verdicts": [{"cand": 1, "same_as": 1, "relation": "subject"}]}
+rj = harvest.same_as(J4, [{"title": "Pricing", "text": "T2 x"}])
+check("same_as: the words decide which shown sub-question it duplicates (LLM named S1, the words match S3 'pricing')",
+      list(rj.values())[0][0] == 3 if rj else False, rj)
 LLM["judge"] = None
 nj = len(LLM["judge_calls"])
 check("same_as: no candidates / no sub-questions -> {} without a call",
