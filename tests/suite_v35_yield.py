@@ -195,4 +195,13 @@ harvest.ensure_yield_rule(R6, subs4, 2)
 check("ensure_yield_rule: an older v3.1 rebase is kept, the new one appended",
       [r.get("rule") for r in harvest.yield_rebases(R6)] == [None, 2], harvest.yield_rebases(R6))
 
+# ---------- 7. sub_room: EMERGE_CAP 3.0, plateaued sub-questions not counted ----------
+check("EMERGE_CAP default 3.0", harvest.EMERGE_CAP == 3.0)
+sr = [S(i) for i in range(1, 25)]
+check("sub_room: 12 base x 3.0 = 36, 24 active -> 12", harvest.sub_room(sr, 12) == 12, harvest.sub_room(sr, 12))
+sr[4]["plateau"] = 14; sr[7]["plateau"] = 15
+check("sub_room: 2 plateaued do not count -> 14", harvest.sub_room(sr, 12) == 14, harvest.sub_room(sr, 12))
+check("sub_room: over the cap (woken sub-questions) -> <= 0, no births",
+      harvest.sub_room([S(i) for i in range(1, 40)], 12) <= 0)
+
 finish(RESULTS, SCRATCH)

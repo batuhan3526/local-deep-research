@@ -358,6 +358,7 @@ pl, out = run_emerge(resp=["not", "a", "dict"])
 check("emerge: a non-dict answer -> no births, no crash", out["born"] == [] and len(pl["subquestions"]) == 2)
 
 # no per-round limit, only the total cap
+harvest.EMERGE_CAP = 2.0  # the cap arithmetic below was written for 2.0 (default 3.0 since v3.5)
 pl, out = run_emerge(resp={"topics": [topic(1), topic(2), topic(3)]})
 check("emerge: 3 accepted, total cap 2.0 x 2 base = 4 -> 2 born (ids 6, 7), the third says 'not born: room'",
       [b["id"] for b in out["born"]] == [6, 7] and len(pl["subquestions"]) == 4
@@ -377,6 +378,10 @@ pl4 = copy.deepcopy(pl3); pl4["subquestions"].append({**child, "id": 7, "text": 
 pl, out = run_emerge(pl4, resp={"topics": [topic(1)]})
 check("emerge cap reached: no embedding, no LLM call, why 'cap reached'",
       out == {"candidates": 0, "born": [], "why": "cap reached"} and not EM["calls"] and not EMB_CALLS, out)
+pl4p = copy.deepcopy(pl4); pl4p["subquestions"][0]["plateau"] = 3
+pl, out = run_emerge(pl4p, resp={"topics": [topic(1), topic(2)]})
+check("emerge cap: a plateaued sub-question does not count (v3.5) -> room 1 at 4/4, one born",
+      len(out["born"]) == 1 and len(pl["subquestions"]) == 5, out)
 pl5 = copy.deepcopy(pl4); pl5["base_subs"] = 3
 pl, out = run_emerge(pl5, resp={"topics": [topic(1), topic(2)]})
 check("emerge: stored base_subs wins (3 -> cap 6, room 2)", len(out["born"]) == 2 and pl["base_subs"] == 3, out)

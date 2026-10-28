@@ -250,6 +250,7 @@ check("clean_plan: unknown origin.kind / non-int hits dropped, 'emerge' kept",
           "round": 2, "kind": "emerge", "claims": 80}, odd)
 
 # cap shared with emerge
+harvest.EMERGE_CAP = 2.0  # the cap arithmetic below was written for 2.0 (default 3.0 since v3.5)
 child = {"id": 3, "title": "c", "text": "T12 child", "queries": [{"q": "c", "kind": "docs"}], "parent": 1, "born": 3,
          "origin": {"round": 2, "claims": 80, "domains": 15}}
 pl3 = copy.deepcopy(BASE_PL); pl3["subquestions"].append(dict(child))
@@ -262,6 +263,10 @@ pl, out = run_probe(pl4)
 check("probe cap reached: no LLM call, no search, no embedding",
       out == {"candidates": 0, "born": [], "why": "cap reached"} and not LLM["calls"] and not SEARCHED
       and not EMB_CALLS, out)
+pl4p = copy.deepcopy(pl4); pl4p["subquestions"][1]["plateau"] = 3
+pl, out = run_probe(pl4p)
+check("probe cap: a plateaued sub-question does not count (v3.5) -> room 1 at 4/4, one born",
+      len(out["born"]) == 1 and len(pl["subquestions"]) == 5, out)
 
 # resume: this round's probe births already in the plan -> no second set
 pb = {"id": 3, "title": "KVKK compliance", "text": "T20 kvkk", "queries": [{"q": "T20 kvkk one", "kind": "docs"}],

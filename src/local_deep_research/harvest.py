@@ -153,7 +153,10 @@ EMERGE_ROUNDS = 2  # emerging topics are looked for in the claims first seen in 
 EMERGE_MIN, EMERGE_DOMS, EMERGE_COH, EMERGE_FAR = 80, 15, 0.58, 0.55  # cluster size, domains, cohesion, max coverage
 # no per-round birth limit (user decision 2026-10-27: every accepted topic is born; a limit of 2 left accepted ones
 # waiting); only the total cap and the candidate count of one LLM call remain
-EMERGE_ASK, EMERGE_CAP = 10, 2.0  # candidates to the LLM per round, max sub-questions = cap x the plan's
+EMERGE_ASK, EMERGE_CAP = 10, 3.0  # candidates to the LLM per round, max ACTIVE sub-questions = cap x the plan's
+# (user decision 2026-10-28: 2.0 -> 3.0, and plateaued sub-questions no longer count: they get no queries and only a
+# PLATEAU_W page share, so a topic that dried up hands its place to a new one; live OSINT run hit 24/24 in round 19
+# with 2 of them plateaued)
 # v3.4 blind-spot probe (probe()): emerge only sees clusters INSIDE the corpus; the probe asks the LLM what an expert
 # would expect that the corpus never touched, then checks with a cheap snippet-only search that the web has evidence
 # for it and that the corpus does not have it yet. Cosines are MiniLM (rt_embed CPU model). Calibrated 2026-10-27 on
@@ -2037,6 +2040,12 @@ def sub_weights(subs, prev, rnd, root=None, mode=None):
     return lineage_cap(subs, out)
 
 
+def sub_room(subs, base_n):
+    """how many sub-questions emerge() / probe() may still add: EMERGE_CAP x the plan's own sub-questions minus the
+    ACTIVE ones (plateaued ones do not count; one that wakes up again may briefly put the total over the cap)"""
+    return int(EMERGE_CAP * base_n) - sum(1 for s in subs if not s.get("plateau"))
+
+
 def lineages(subs):
     """{root sub id: [ids]}: a sub-question and everything born from it (parent chains) form one lineage."""
     by = {s["id"]: s for s in subs}
@@ -2332,7 +2341,7 @@ def emerge(root, pl, rnd, a):
     if done:  # a crash after the plan was saved, before round-<rnd>.json got "emerge": no second set of births
         return {"candidates": 0, "born": [{"id": s["id"], "title": s["title"], "parent": s.get("parent")} for s in done],
                 "why": "resumed"}
-    room = int(EMERGE_CAP * base_n) - len(subs)
+    room = sub_room(subs, base_n)
     src_f, cl_f = root / "harvest/sources.csv", root / "claims/claims.csv"
     if room <= 0 or not src_f.exists() or not cl_f.exists():
         return {"candidates": 0, "born": [], "why": "cap reached" if room <= 0 else "no data"}
@@ -2576,7 +2585,7 @@ def probe(root, pl, rnd, a):
     if done:  # a crash after the plan was saved, before round-<fin>.json got "probe": no second set of births
         return {"candidates": 0, "born": [{"id": s["id"], "title": s["title"], "hits": s["origin"].get("hits", 0),
                                            "domains": s["origin"].get("domains", 0)} for s in done], "why": "resumed"}
-    room = int(EMERGE_CAP * base_n) - len(subs)
+    room = sub_room(subs, base_n)
     if room <= 0:
         return {"candidates": 0, "born": [], "why": "cap reached"}
     data = "Corpus digest:\n" + probe_digest(root, subs)
