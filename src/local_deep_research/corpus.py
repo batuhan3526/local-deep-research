@@ -4,6 +4,7 @@ usage:
   corpus.py fetch   <research_dir> [--reading-list 30]   fetch every cited URL (+ top reading-list PDFs) into the cache
   corpus.py extract <research_dir> [--concurrency N] [--focus TEXT]    claims + followups, straight from the LLM server
   corpus.py verify  <research_dir> [--no-corroborate] [--max-pairs 1200] [--stop-window 200 --stop-lift 0.03]
+                    [--priority claims/.sweep_priority.json]
                                                         ground quotes, cluster, corroborate, confidence
   corpus.py corroborate <research_dir> [-k 6] [--concurrency N]           the corroboration step alone (+ outputs)
 (--concurrency defaults to the config's llm_concurrency)
@@ -1730,7 +1731,16 @@ def trusted_src(u):
         return False
 
 
-def corroborate(st, k=CORR_K, max_pairs=CORR_MAX_PAIRS, conc=48, stop_window=None, stop_lift=None):
+def corr_order(todo, own_tr, prio=None):
+    """the clusters' corroboration order: own source trusted first, then bigger (stable: claim order breaks ties);
+    with prio ({head claim: score}, the v3.5 sweep) by score first, that order breaking ties"""
+    if prio:
+        return sorted(todo, key=lambda cl: (-float(prio.get(cl["head"]["claim"], 0) or 0), not own_tr[cl["key"]],
+                                            -len(cl["members"])))
+    return sorted(todo, key=lambda cl: (not own_tr[cl["key"]], -len(cl["members"])))
+
+
+def corroborate(st, k=CORR_K, max_pairs=CORR_MAX_PAIRS, conc=48, stop_window=None, stop_lift=None, prio=None):
     """Grounded clusters with < 2 independent sources: retrieve passages from OTHER source groups (BM25 + MiniLM,
     reciprocal-rank fusion), ask the LLM supports / contradicts / unrelated with a verbatim quote, ground the quote in
     that page. Every judged pair is appended (fsync'd) to claims/.corroborated.jsonl and never judged again.
@@ -1740,7 +1750,8 @@ def corroborate(st, k=CORR_K, max_pairs=CORR_MAX_PAIRS, conc=48, stop_window=Non
     then by size; within a rank, pairs by cosine + trusted bonuses. At most CORR_TODO_MAX clusters and, per cluster,
     the CORR_CAND best passages by cosine and by BM25 are ranked (bounded kNN, never all clusters x all passages).
     The run stops early when the last stop_window judgements lifted fewer than stop_lift of them; st["corr_stats"]
-    records judged / lifted / early stop for harvest (unused budget -> more pages next round)."""
+    records judged / lifted / early stop for harvest (unused budget -> more pages next round). prio (v3.5 final sweep,
+    {head claim: score} from harvest.sweep_priority): clusters are taken in that order instead (unscored last)."""
     stop_window = CORR_STOP_WINDOW if stop_window is None else stop_window
     stop_lift = CORR_STOP_LIFT if stop_lift is None else stop_lift
     st["corr_stats"] = {"judged": 0, "lifted": 0, "early_stop": False, "max_pairs": max_pairs}
@@ -1753,7 +1764,7 @@ def corroborate(st, k=CORR_K, max_pairs=CORR_MAX_PAIRS, conc=48, stop_window=Non
     if not todo or not urls:
         return 0
     own_tr = {cl["key"]: any(trusted_src(c["url"]) for c in cl["ok"]) for cl in todo}
-    todo.sort(key=lambda cl: (not own_tr[cl["key"]], -len(cl["members"])))  # stable: claim order breaks ties
+    todo = corr_order(todo, own_tr, prio)
     todo = todo[:max(CORR_TODO_MAX, max_pairs)]
     meta, pv = passages(st["root"], urls)
     if not meta:
@@ -1907,9 +1918,17 @@ def cmd_verify(a):
     corr_s = 0.0
     if not getattr(a, "no_corroborate", False):
         t0 = time.monotonic()
+        prio = None
+        pf = getattr(a, "priority", None)
+        if pf:
+            try:
+                prio = json.loads(pathlib.Path(pf).read_text(encoding="utf-8"))
+                prio = prio if isinstance(prio, dict) else None
+            except (OSError, ValueError):
+                print(f"corroborate: priority file {pf} unreadable; usual order", file=sys.stderr)
         n = corroborate(st, getattr(a, "k", CORR_K), getattr(a, "max_pairs", CORR_MAX_PAIRS),
                         getattr(a, "concurrency", None) or llm_concurrency(),
-                        getattr(a, "stop_window", None), getattr(a, "stop_lift", None))
+                        getattr(a, "stop_window", None), getattr(a, "stop_lift", None), prio)
         corr_s = time.monotonic() - t0
         corr = corr_results(st)
         print(f"corroborate: {n} judged in {corr_s:.0f}s; Yüksek {before} -> "
@@ -2095,6 +2114,7 @@ def main():
         p.add_argument("-k", type=int, default=CORR_K)
         p.add_argument("--stop-window", type=int, default=CORR_STOP_WINDOW, help="0 = never stop early")
         p.add_argument("--stop-lift", type=float, default=CORR_STOP_LIFT)
+        p.add_argument("--priority", type=pathlib.Path, help="JSON {head claim: score}: cluster order (harvest sweep)")
         if name == "verify":
             p.add_argument("--no-corroborate", action="store_true")
     p = sub.add_parser("search"); p.add_argument("root", type=pathlib.Path); p.add_argument("query")

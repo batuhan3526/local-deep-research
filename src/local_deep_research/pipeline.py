@@ -20,6 +20,7 @@ import datetime
 import html
 import importlib
 import inspect
+import json
 import os
 import pathlib
 import re
@@ -183,6 +184,22 @@ def _local_facts_done(root):
     return not src.exists() or newer(root / "claims/local-facts.md", src)
 
 
+def _sweep(ctx):
+    must("harvest", ["sweep", ctx.root, "--concurrency", ctx.conc])
+    touch(ctx.root / "harvest/.sweep_done")
+
+
+def _sweep_done(root):
+    # v3.5; like the gap round: never after the analysts started (a run resumed past it)
+    if (root / "harvest/.sweep_done").exists() or analysis_started(root):
+        return True
+    try:
+        d = json.loads((root / "harvest/sweep.json").read_text(encoding="utf-8"))
+        return "verify" in d and "pool" in d
+    except (OSError, ValueError):
+        return False
+
+
 def _gap(ctx):
     must("harvest", ["gap", ctx.root, "--concurrency", ctx.conc])
     touch(ctx.root / "harvest/.gap_done")
@@ -323,6 +340,8 @@ def phases():
         Phase("profile", _profile, R("harvest/profile.json"), about="harvest/profile.json (sizes, languages)"),
         Phase("plan", _plan, R("harvest/plan.json"), about="harvest/plan.json (sub-questions + queries)"),
         Phase("harvest", _harvest, R("harvest/.done"), about="search / fetch / extract / verify rounds -> claims/"),
+        Phase("sweep", _sweep, _sweep_done, True, "final sweep: corroborate the best single-source clusters, "
+              "one round from the carried pool"),
         Phase("contradictions", _contradictions, _contradictions_done, True, "claims/CONTRADICTIONS.md"),
         Phase("notes", _notes, _notes_done, True, "notes/s<n>.md, skeptic.md, local-project.md"),
         Phase("local-facts", _local_facts, _local_facts_done, True, "claims/local-facts.md"),

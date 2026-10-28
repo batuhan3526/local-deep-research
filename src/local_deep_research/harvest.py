@@ -194,6 +194,13 @@ THIN_CORPUS_MIN = 500  # fewer grounded claims: no thin topics (too few to tell 
 THIN_DEPTH = 0.70      # thin: depth < this x the corpus share
 THIN_TOP = 15          # thin topics shown to the probe (shallowest first)
 THIN_KINDS = ("number", "limitation")  # claim kinds that show evaluated, quantified or bounded knowledge
+# v3.5 final sweep (cmd_sweep, pipeline phase "sweep" between harvest and notes): what the rounds left unprocessed.
+# Live OSINT run after round 23: 113k single-source Orta clusters, but each round's corroboration judged ~400 pairs
+# (it stops when the last 200 lift < 3%) of the 4,000 clusters it ranks by own-source trust and size only; 25k
+# selected-worthy candidates sat in the carry pool. The sweep corroborates SWEEP_PAIRS pairs in importance order
+# (sweep_priority) without the early stop, then runs one round that searches nothing and picks from the pool.
+SWEEP_PAIRS = 10000    # ~1.5 h at the live ~2 judgements / s
+SWEEP_KIND_BONUS = 0.1  # a number / limitation claim (THIN_KINDS) first among equally relevant ones
 PROBE_DEPTH_ASK = 4    # depth gaps per round: a separate LLM call over the thin topics (probe_depth())
 # (live round 23: it re-proposed "OSINT Geolocation Methods" next to a sub-question listing geolocation methods; MiniLM
 # put the two texts at 0.60, below any restatement threshold, and told "not if a sub-question asks it", Sage-A1.5
@@ -3023,8 +3030,9 @@ def cmd_run(a):
                     print("  plateaued (no queries this round): "
                           + ", ".join(f"S{k} (since round {v})" for k, v in flat.items()), flush=True)
             a.sub_weights = sub_weights(subs, prev, rnd, root)
-            queries = round_queries(root, pl, subs, rnd, a, used_q, getattr(a, "note_gaps", None))
-            langs = active_langs(root, pl, getattr(a, "langs", None) or [], rnd)
+            pool_only = bool(getattr(a, "pool_only", False))  # v3.5 sweep: pick from the carried pool, search nothing
+            queries = [] if pool_only else round_queries(root, pl, subs, rnd, a, used_q, getattr(a, "note_gaps", None))
+            langs = [] if pool_only else active_langs(root, pl, getattr(a, "langs", None) or [], rnd)
             lq = lang_queries(root, pl, subs, rnd, langs) if langs else []
             queries += lq
             save_plan(root, pl)
@@ -3035,7 +3043,7 @@ def cmd_run(a):
                 est = round_minutes(len(queries), n_pages, mp or corpus.CORR_MAX_PAIRS)
                 log_round(root, rnd, eta=f"tur 1 ≈ {est:.0f} dk, {target} tur ≈ {est * target * 0.8:.0f} dk "
                                          f"(tahmin: EST sabitleri, ölçüm yok)")
-            cands = search_all(queries)
+            cands = search_all(queries) if queries else []
             carried = [dict(x) for x in _dicts(prev.get("carry"))]  # last round's unselected good candidates
             if rnd > 1 and prev and "carry" not in prev:  # a round run before carry-over existed: its candidates
                 carried = search_all(past_queries(pl, rnd - 1))  # again, from the search cache (no new requests
@@ -3341,6 +3349,91 @@ def cmd_gap(a):
                                         "note_gaps": {str(k): len(v) for k, v in a.note_gaps.items()}}))
 
 
+def sweep_priority(root, subs):
+    """v3.5: {head claim: score} for the sweep's corroboration order: the single-source Orta clusters, scored by
+    relevance to their closest sub-question (cosine, >= PACK_MIN_SIM, as packs()) x that sub-question's need
+    (1 / sqrt(1 + its Yüksek clusters), scaled to max 1: thin sub-questions first) + SWEEP_KIND_BONUS for a
+    number / limitation claim. Topic-agnostic: vectors, labels and kinds only."""
+    import numpy as np
+    from . import rt_embed
+    f = root / "claims/claims.csv"
+    rows = [r for r in corpus.read_csv(f) if (r.get("claim") or "").strip() and r.get("confidence") != "Düşük"] \
+        if f.exists() else []
+    if not rows or not subs:
+        return {}
+    v = probe_claim_vecs(root, [r["claim"] for r in rows])
+    sv = _unit(rt_embed.embed([s["text"] for s in subs], model=rt_embed.CPU_MODEL, device="cpu"))
+    sim = v @ sv.T
+    best, rel = sim.argmax(1), sim.max(1)
+    high = collections.Counter(int(b) for b, r, x in zip(best, rows, rel)
+                               if r["confidence"] == "Yüksek" and x >= PACK_MIN_SIM)
+    need = np.array([1 / math.sqrt(1 + high[j]) for j in range(len(subs))])
+    need /= need.max()
+    out = {}
+    for i, r in enumerate(rows):
+        if r["confidence"] != "Orta" or str(r.get("sources") or "0") not in ("0", "1") or rel[i] < PACK_MIN_SIM:
+            continue
+        out[r["claim"]] = round(float(rel[i] * need[best[i]]) + (SWEEP_KIND_BONUS if r.get("kind") in THIN_KINDS else 0), 4)
+    return out
+
+
+def cmd_sweep(a):
+    """v3.5 final sweep, once after the harvest rounds (pipeline phase "sweep"): (1) corroboration of up to a.pairs
+    pairs in sweep_priority() order without the early stop (no new pages); (2) one round that runs no search and
+    selects only from the carry pool (+ one-hop links), weighted as usual. Idempotent and resumable: harvest/sweep.json
+    records each part; --again redoes both."""
+    root = a.root
+    st = load_state(root)
+    pf = root / "harvest/plan.json"
+    if st["round"] < 1 or not pf.exists():
+        sys.exit("no finished harvest round yet: run `harvest.py run` first")
+    sf = corpus.under(root, "harvest/sweep.json")
+    try:
+        done = json.loads(sf.read_text(encoding="utf-8")) if sf.exists() and not a.again else {}
+    except ValueError:
+        done = {}
+    subs = clean_plan(json.loads(pf.read_text(encoding="utf-8")))["subquestions"]
+    if "verify" not in done:
+        t0 = time.time()
+        prio = sweep_priority(root, subs)
+        qf = corpus.under(root, "claims/.sweep_priority.json")
+        corpus.atomic_write(qf, json.dumps(prio, ensure_ascii=False))
+        before = verify_stats(root)
+        y0 = verified_yield(root)
+        print(f"sweep: corroborating up to {a.pairs} pairs over {len(prio)} single-source clusters, importance "
+              f"order, no early stop", flush=True)
+        conc = live_concurrency(root, a.concurrency)
+        corpus_cmd("verify", str(root), "--concurrency", str(max(min(conc, 8), conc - 16)), "--max-pairs",
+                   str(a.pairs), "--stop-window", "0", "--priority", str(qf))
+        vs = verify_stats(root)
+        done["verify"] = {"clusters": len(prio), "judged": vs.get("judged"), "lifted": vs.get("lifted"),
+                          "yield_before": y0, "yield_after": verified_yield(root),
+                          "minutes": round((time.time() - t0) / 60, 1), "round": st["round"]}
+        corpus.atomic_write(sf, json.dumps(done, ensure_ascii=False))
+        print(f"sweep: corroboration judged {vs.get('judged')} pairs, lifted {vs.get('lifted')} clusters; verified "
+              f"yield {y0} -> {done['verify']['yield_after']} ({done['verify']['minutes']} min)"
+              + (f" [round verify judged {before.get('judged')}]" if before else ""), flush=True)
+    if "pool" not in done:
+        st = load_state(root)
+        last = round_info(root, st["round"]) if st["stage"] == "done" else {}
+        if st["stage"] == "done" and not _dicts(last.get("carry")) and not _dicts(last.get("links")):
+            done["pool"] = {"round": None, "pages": 0, "why": "no carried candidates"}
+            corpus.atomic_write(sf, json.dumps(done, ensure_ascii=False))
+            print("sweep: no carried candidates: no pool round", flush=True)
+            return
+        if st["stage"] == "done":  # a pool round already in progress resumes as a normal crashed round
+            print(f"sweep: one round from the carried candidate pool ({len(_dicts(last.get('carry')))} candidates, "
+                  "no search)", flush=True)
+        a.pool_only, a.no_emerge, a.no_probe, a.rounds, a.until = True, True, True, 1, 0
+        cmd_run(a)
+        info = round_info(root, load_state(root)["round"])
+        done["pool"] = {"round": load_state(root)["round"], "pages": len(info.get("sel") or []),
+                        "new_yield": info.get("new_yield"), "new_yield_adj": info.get("new_yield_adj")}
+        corpus.atomic_write(sf, json.dumps(done, ensure_ascii=False))
+        print(f"sweep: pool round {done['pool']['round']}: {done['pool']['pages']} pages, new yield "
+              f"{done['pool']['new_yield']}", flush=True)
+
+
 def cmd_profile(a):
     p = resolve_profile(a.profile, a.sources, a.rounds, a.subs, a.pages, a.per_sub, not a.no_early_stop,
                         a.min_yield_ratio, getattr(a, "langs", None), getattr(a, "out_lang", None))
@@ -3362,7 +3455,8 @@ def cmd_profile(a):
 
 
 RUN_DEFAULTS = {"run": {"rounds": 2, "subs": 6, "per_sub": 14, "pages": 160},
-                "gap": {"rounds": 1, "subs": 6, "per_sub": 14, "pages": 100}}
+                "gap": {"rounds": 1, "subs": 6, "per_sub": 14, "pages": 100},
+                "sweep": {"rounds": 1, "subs": 6, "per_sub": 14, "pages": 160}}
 
 
 def apply_profile(a):
@@ -3389,7 +3483,7 @@ def apply_profile(a):
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("run", "gap"):
+    for name in ("run", "gap", "sweep"):
         p = sub.add_parser(name); p.add_argument("root", type=pathlib.Path)
         p.add_argument("--rounds", type=int); p.add_argument("--subs", type=int)
         p.add_argument("--per-sub", type=int); p.add_argument("--pages", type=int)
@@ -3403,6 +3497,8 @@ def main():
             p.add_argument("--until", type=int, default=0, help="absolute last round (restart-safe; 0 = --rounds more)")
         else:
             p.add_argument("--again", action="store_true")
+        if name == "sweep":
+            p.add_argument("--pairs", type=int, default=SWEEP_PAIRS, help="corroboration pairs, no early stop")
     p = sub.add_parser("plan"); p.add_argument("root", type=pathlib.Path); p.add_argument("--subs", type=int, default=6)
     p.add_argument("--per-sub", type=int, default=14)
     p = sub.add_parser("novelty", help="v3.4: paraphrase-duplicate yield of the finished rounds -> round-<k>.json")
@@ -3421,11 +3517,11 @@ def main():
     a = ap.parse_args()
     corpus.safe_stdio()
     a.root = a.root.resolve()
-    if a.cmd in ("run", "gap") and not a.concurrency:
+    if a.cmd in ("run", "gap", "sweep") and not a.concurrency:
         a.concurrency = corpus.llm_concurrency()
     if a.root.name != "research" and (a.root / "research").is_dir():
         a.root = a.root / "research"
-    if a.cmd in ("run", "gap", "plan"):  # raw LLM log + raw page bytes into the run's dataset/ (v3.1)
+    if a.cmd in ("run", "gap", "sweep", "plan"):  # raw LLM log + raw page bytes into the run's dataset/ (v3.1)
         corpus.llmlog.set_root(a.root)
         corpus.RAW_DIR[0] = a.root / "dataset/raw"
     if a.cmd == "novelty":
@@ -3442,7 +3538,7 @@ def main():
             sys.exit(str(e))
     else:
         apply_profile(a)
-        cmd_gap(a) if a.cmd == "gap" else cmd_run(a)
+        {"gap": cmd_gap, "sweep": cmd_sweep}.get(a.cmd, cmd_run)(a)
 
 
 if __name__ == "__main__":
