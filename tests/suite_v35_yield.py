@@ -204,4 +204,13 @@ check("sub_room: 2 plateaued do not count -> 14", harvest.sub_room(sr, 12) == 14
 check("sub_room: over the cap (woken sub-questions) -> <= 0, no births",
       harvest.sub_room([S(i) for i in range(1, 40)], 12) <= 0)
 
+# ---------- 8. select: a candidate whose sub-question left the plan goes to the closest one ----------
+harvest.ce_scores = lambda pairs: None
+SC = [{"url": f"https://site{i}.org/p{i}", "title": f"T{2 if i % 2 else 1} page {i}", "snippet": "s", "src": "web",
+       "year": "", "query": "q", "sub": 34 if i < 4 else (1 if i % 2 == 0 else 2)} for i in range(8)]
+sel = harvest.select([dict(c) for c in SC], [S(1), S(2)], set(), 8)
+moved = {c["url"]: c["sub"] for c in sel if c["url"] in {SC[i]["url"] for i in range(4)}}
+check("select: candidates of a removed sub-question (34) are kept and re-assigned by similarity, no KeyError",
+      len(moved) == 4 and moved[SC[0]["url"]] == 1 and moved[SC[1]["url"]] == 2, moved)
+
 finish(RESULTS, SCRATCH)

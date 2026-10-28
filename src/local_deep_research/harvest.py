@@ -1330,6 +1330,9 @@ def select(cands, subs, seen, n_pages, weights=None, lang_share=0.0, rest=None):
         for c, v in zip(pool, vec):
             # relevance to its sub-question + mild priors (jina-style): found by several queries, host and path prefix
             # common among all candidates, domain class, papers, publication year (freshness)
+            if c["sub"] not in svec:  # its sub-question left the plan (removed by hand; carried / linked candidates
+                # still name it): the closest remaining one takes it (live 2026-10-28: KeyError on 25k carried pages)
+                c["sub"] = max(svec, key=lambda k: float(v @ svec[k]))
             c["nq"], c["prior"] = len(c.pop("qs")), domain_prior(c["url"])
             c["srcs"] = sorted(c["srcs"])
             c["rel"] = round(float(v @ svec[c["sub"]]), 4)
