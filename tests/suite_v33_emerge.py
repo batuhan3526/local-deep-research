@@ -240,9 +240,13 @@ BASE_PL = {"subquestions": [
     {"id": 5, "title": "Targets", "text": "T8 etf direction targets", "aspects": ["T1 label horizon"],
      "checks": ["definitive", "plurality"], "queries": [{"q": "etf targets", "kind": "academic"}]}]}
 EM = {"resp": None, "calls": [], "raise": False}
+JUDGE = {"resp": None, "calls": []}  # v3.5 birth judge (same_as): its own call log, so EM["calls"] stays emerge's
 
 
 def em_llm(prompt, max_tokens=6000, system=None):
+    if "Each proposal below" in prompt:
+        JUDGE["calls"].append((prompt, system))
+        return copy.deepcopy(JUDGE["resp"] or {"verdicts": []})
     EM["calls"].append((prompt, system))
     if EM["raise"]:
         raise RuntimeError("model down")
@@ -357,6 +361,14 @@ check("emerge: a non-list 'topics' answer -> no births, no crash", out["born"] =
 pl, out = run_emerge(resp=["not", "a", "dict"])
 check("emerge: a non-dict answer -> no births, no crash", out["born"] == [] and len(pl["subquestions"]) == 2)
 
+JUDGE["calls"].clear(); JUDGE["resp"] = {"verdicts": [{"cand": 1, "same_as": 1, "relation": "subject",
+                                                       "why": "S1 already asks it"}]}
+pl, out = run_emerge(resp={"topics": [topic(1, title="Purged CV leakage"), topic(2)]})
+jud = [(c.get("verdict") or {}).get("why", "") for c in out["clusters"]]
+check("emerge + judge (v3.5): the accepted topic judged a duplicate of S1 is not born, its verdict says so; the other is",
+      len(JUDGE["calls"]) == 1 and len(out["born"]) == 1 and any(w.startswith("not born: same as S1 (judge)") for w in jud),
+      (out["born"], jud))
+JUDGE["resp"] = None
 # no per-round limit, only the total cap
 harvest.EMERGE_CAP = 2.0  # the cap arithmetic below was written for 2.0 (default 3.0 since v3.5)
 pl, out = run_emerge(resp={"topics": [topic(1), topic(2), topic(3)]})
