@@ -1178,7 +1178,7 @@ def canon(u):
 # domain classes (UNRELIABLE / CONTENT_FARM / PRIMARY / TRUSTED, farm heuristic, domain_prior) live in srcclass.py,
 # shared with corpus.py independence counting; re-exported here (harvest.domain_prior etc.)
 from .srcclass import (academic, academic_key, CONTENT_FARM, FARM_OK, KNOWN_GH, PRIMARY, TRUSTED, UNRELIABLE, _BLOGISH, _DOCS,  # noqa: E402,F401
-                      _FARM_LONG, _FARM_SHORT, _GOV, _in, domain_prior, farm_like, scholarly, src_class)
+                      _FARM_LONG, _FARM_SHORT, _GOV, _in, domain_prior, farm_like, practitioner, scholarly, src_class)
 
 
 def dom_key(u):
@@ -1488,24 +1488,107 @@ def split_pack(lines, max_lines=None, max_chars=None):
 DEF_HIGH, PLUR_DOMS, PLUR_N, ASPECT_SIM = 2, 5, 6, 0.40  # MiniLM: short aspect phrase vs claim maxes ~0.35-0.6 (live 2026-10-18)
 
 
-def row_yield(r):
-    """verified yield of one claims.csv cluster: Yüksek (2+ independent non-farm sources) = 1, a grounded Orta whose
-    source is trusted / primary = 0.25, else 0"""
+YIELD_RULE = 2  # v3.5; a run whose rounds were measured under an older rule is rebased once (ensure_yield_rule)
+
+
+def row_yield(r, rule=YIELD_RULE):
+    """verified yield of one claims.csv cluster. Rule 1 (up to v3.4): Yüksek (2+ independent non-farm sources, one
+    academic / official) = 1, a grounded Orta whose source is trusted / primary = 0.25, else 0. That rewards fields
+    with dense academic literature: 51.6k of the live OSINT run's 63k Orta clusters were single academic sources at
+    0.25 each, while a tool's own repository / docs / help centre earned nothing. Rule 2 (v3.5, topic-agnostic)
+    adds the practitioner primary sources (srcclass.practitioner) next to trusted / primary ones, and independent
+    corroboration without an academic anchor: Orta with 2+ independent sources = 0.25, 0.5 when one of them is
+    trusted / primary / practitioner. Yüksek stays 1."""
     if r.get("confidence") == "Yüksek":
         return 1.0
-    if r.get("confidence") == "Orta" and any(domain_prior(u) >= 0.06 for u in str(r.get("urls", "")).split()):
-        return 0.25
-    return 0.0
+    if r.get("confidence") != "Orta":
+        return 0.0
+    urls = str(r.get("urls", "")).split()
+    good = any(domain_prior(u) >= 0.06 for u in urls)
+    if rule < 2:
+        return 0.25 if good else 0.0
+    good = good or any(practitioner(u) for u in urls)
+    try:
+        n = int(r.get("sources") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n >= 2:
+        return 0.5 if good else 0.25
+    return 0.25 if good else 0.0
+
+
+def yield_rebases(root):
+    """harvest/yield_rebase.json: the yield-rule changes of a run, oldest first. Each {factor, from_round, why} (v3.1
+    anchor rule; a bare dict in older runs) or, v3.5, also {rule, from_rule, sub_factor, sub_base}: the rounds before
+    from_round were measured under the old rule, so their yield/min (ref_ypm) is scaled by factor (new-rule /
+    old-rule yield of the same corpus) and each sub-question's history (sub_hist) by its sub_factor, and the stricter
+    or looser rule does not look like the information drying up or flooding in."""
+    try:
+        x = json.loads((root / "harvest/yield_rebase.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    x = x.get("rebases", [x]) if isinstance(x, dict) else x
+    return [r for r in x if isinstance(r, dict)] if isinstance(x, list) else []
 
 
 def yield_rebase(root):
-    """harvest/yield_rebase.json {factor, from_round, why}: written when the confidence rule changes mid-run (v3.1
-    anchor rule): round 1's yield/min reference is scaled by factor (new-rule / old-rule yield of the same corpus) so
-    the stricter label does not look like the information drying up."""
+    """the last rebase or None (callers before v3.5 knew only one)"""
+    rb = yield_rebases(root)
+    return rb[-1] if rb else None
+
+
+def rebase_factor(root, k, rnd, sid=None):
+    """the factor round k's yield is scaled by when compared within round rnd's history: the product over the
+    rebases with k < from_round <= rnd (their sub_factor[sid] for a sub-question, falling back to factor)"""
+    f = 1.0
+    for rb in yield_rebases(root):
+        if k < int(rb.get("from_round", 10 ** 6)) <= rnd:
+            sf = (rb.get("sub_factor") or {}).get(str(sid)) if sid is not None else None
+            f *= float(sf if sf is not None else rb.get("factor", 1.0))
+    return f
+
+
+def rule_at(root, k):
+    """the yield rule round k was measured under: from the rebases' rule / from_rule, YIELD_RULE without any"""
+    rule = None
+    for rb in yield_rebases(root):
+        if "rule" not in rb:
+            continue
+        if int(rb.get("from_round", 10 ** 6)) <= k:
+            rule = int(rb["rule"])
+        elif rule is None:
+            return int(rb.get("from_rule", 1))
+    return rule if rule is not None else YIELD_RULE
+
+
+def ensure_yield_rule(root, subs, rnd):
+    """v3.5: a run whose finished rounds were measured under an older yield rule (no harvest/yield_rule.json but
+    round-<k>.json with "ypm" = rule 1) gets one rebase from round rnd on: the global factor and per-sub-question
+    factors from today's claims.csv under both rules, and sub_base (each sub-question's cumulative yield under the
+    new rule), which round rnd's sub_new starts from instead of round rnd-1's old-rule sub_cum. Idempotent; a new
+    run just records YIELD_RULE. Returns the rebase written or None."""
+    f = corpus.under(root, "harvest/yield_rule.json")
     try:
-        return json.loads((root / "harvest/yield_rebase.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        cur = int(json.loads(f.read_text(encoding="utf-8")).get("rule"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        done = [k for k in range(1, rnd) if "ypm" in round_info(root, k)]
+        cur = 1 if done else YIELD_RULE
+    if cur >= YIELD_RULE or rnd < 2:
+        corpus.atomic_write(f, json.dumps({"rule": max(cur, YIELD_RULE)}))
         return None
+    rows = list(corpus.read_csv(root / "claims/claims.csv")) if (root / "claims/claims.csv").exists() else []
+    old, new = sum(row_yield(r, cur) for r in rows), sum(row_yield(r) for r in rows)
+    stats = packs(root, subs) if rows else {}
+    sub_f = {str(k): round(x["yield"] / x["yield_rule"][cur], 4) for k, x in stats.items()
+             if x.get("yield_rule", {}).get(cur, 0) > 0}
+    rb = {"rule": YIELD_RULE, "from_rule": cur, "from_round": rnd, "factor": round(new / old, 4) if old > 0 else 1.0,
+          "sub_factor": sub_f, "sub_base": {str(k): x["yield"] for k, x in stats.items()},
+          "why": f"yield rule {cur} -> {YIELD_RULE} (v3.5: practitioner primary sources, corroboration without an "
+                 f"academic anchor); corpus yield {old:.2f} -> {new:.2f}"}
+    corpus.atomic_write(corpus.under(root, "harvest/yield_rebase.json"),
+                        json.dumps({"rebases": yield_rebases(root) + [rb]}, ensure_ascii=False))
+    corpus.atomic_write(f, json.dumps({"rule": YIELD_RULE}))
+    return rb
 
 
 def verified_yield(root):
@@ -1565,7 +1648,9 @@ def packs(root, subs):
                           "domains": {d.strip() for _, r, _ in mine for d in r.get("domains", "").split(",") if d.strip()},
                           "urls": {u for _, r, _ in mine for u in r.get("urls", "").split()},
                           "text": " ".join(r["claim"] + " " + r.get("quote", "") for _, r, _ in mine),
-                          "missing": missing, "yield": round(sum(row_yield(r) for _, r, _ in mine), 2)}
+                          "missing": missing, "yield": round(sum(row_yield(r) for _, r, _ in mine), 2),
+                          "yield_rule": {k: round(sum(row_yield(r, k) for _, r, _ in mine), 2)
+                                         for k in range(1, YIELD_RULE)}}
     return stats
 
 
@@ -1912,13 +1997,31 @@ def verify_stats(root):
         return {}
 
 
-def sub_weights(subs, prev, rnd):
-    """{sub id: weight, mean 1} for round rnd from round rnd-1: new verified yield share (time is shared by all
-    sub-questions, so yield share = yield-per-minute share) + 0.5 if a check still fails; None before round 2."""
+SUB_WEIGHT_MODE = "own"  # v3.5: "own" = each sub-question against its own best round; "share" = share of the yield
+
+
+def sub_weights(subs, prev, rnd, root=None, mode=None):
+    """{sub id: weight, mean 1} for round rnd from round rnd-1, None before round 2.
+    "share" (up to v3.4): the sub-question's share of round rnd-1's new verified yield (time is shared by all
+    sub-questions, so yield share = yield-per-minute share). That compares fields with each other: one with dense
+    academic literature (live OSINT run: the deepfake family, 39.5% of the yield) out-earns a practitioner one (tools,
+    commercial platforms: ~13%), gets more queries, so earns more: a self-reinforcing loop that the lineage cap
+    (LINEAGE_SHARE) only bounds. "own" (v3.5, needs root): round rnd-1's new yield against the sub-question's OWN best
+    round (sub_hist: rebased, paraphrase duplicates out), so a sub-question still at its own pace weighs the same as
+    any other, whatever its field yields in absolute terms; one with no yield yet is neutral. Either way + 0.5 while
+    a check still fails, at most 2.5 before normalising; plateaued / newborn sub-questions get PLATEAU_W / EMERGE_W."""
     y = prev.get("sub_new") if isinstance(prev.get("sub_new"), dict) else None
     if rnd < 2 or not y:
         return None
-    vals = [max(0.0, float(y.get(str(s["id"]), 0) or 0)) for s in subs]
+    mode = mode or (SUB_WEIGHT_MODE if root is not None else "share")
+    if mode == "own":
+        vals = []
+        for s in subs:
+            h = sub_hist(root, s, rnd - 1)
+            peak = max(h, default=0.0)
+            vals.append(max(0.0, h[-1]) / peak if h and peak > 0 else 1.0)
+    else:
+        vals = [max(0.0, float(y.get(str(s["id"]), 0) or 0)) for s in subs]
     m = sum(vals) / max(1, len(vals))
     out = {}
     for s, v in zip(subs, vals):
@@ -1983,28 +2086,26 @@ def lineage_cap(subs, w, share=None):
 
 def ref_ypm(root, rnd):
     """The weak-round reference (v3.3): the best yield/minute of rounds 1..rnd-1 (round 1's alone was the reference
-    before; it is often not the best round). Rounds before a yield_rebase are scaled by its factor. v3.4: a round's
-    ypm_adj (paraphrase duplicates taken out) when it has one, else its ypm."""
-    rb = yield_rebase(root) or {}
+    before; it is often not the best round). Rounds before a yield rebase are scaled by its factor (rebase_factor).
+    v3.4: a round's ypm_adj (paraphrase duplicates taken out) when it has one, else its ypm."""
     best = 0.0
     for k in range(1, rnd):
         i = round_info(root, k)
         y = float(i["ypm_adj"] if i.get("ypm_adj") is not None else i.get("ypm") or 0)
-        if rb and k < int(rb.get("from_round", 10 ** 6)) <= rnd:
-            y *= float(rb.get("factor", 1.0))
-        best = max(best, y)
+        best = max(best, y * rebase_factor(root, k, rnd))
     return round(best, 3)
 
 
 def sub_hist(root, s, rnd):
     """[new yield of sub-question s in round k] for k from its birth round to rnd (missing rounds read as 0). v3.4:
-    a round's sub_new_adj (paraphrase duplicates taken out) when it has one, else its sub_new."""
+    a round's sub_new_adj (paraphrase duplicates taken out) when it has one, else its sub_new. v3.5: rounds before a
+    yield rebase scaled by the sub-question's own factor (rebase_factor)."""
     sid = str(s["id"])
     out = []
     for k in range(int(s.get("born") or 1), rnd + 1):
         i = round_info(root, k)
         h = i.get("sub_new_adj") if isinstance(i.get("sub_new_adj"), dict) else i.get("sub_new") or {}
-        out.append(float(h.get(sid, 0) or 0))
+        out.append(round(float(h.get(sid, 0) or 0) * rebase_factor(root, k, rnd, sid), 4))
     return out
 
 
@@ -2126,7 +2227,8 @@ def novelty(root, subs, rnd, cache=None, data=None, sim=None):
         for i in range(0, len(new), 2048):  # 2048 x 77k float32 ~ 0.6 GB at a time
             best[i:i + 2048] = (v[new[i:i + 2048]] @ vo.T).max(1)
     dup = best >= thr
-    ys = np.array([row_yield(d["rows"][i]) for i in new], dtype=float)
+    rule = rule_at(root, rnd)  # v3.5: a round before a rule change keeps the rule its ypm was measured under
+    ys = np.array([row_yield(d["rows"][i], rule) for i in new], dtype=float)
     act = [s for s in subs if int(s.get("born") or 1) <= rnd]  # the sub-questions round rnd's packs() had
     sub_dup = {str(s["id"]): 0.0 for s in act}
     if act and dup.any():
@@ -2592,6 +2694,16 @@ def cmd_run(a):
     classify(root, pl)
     st = load_state(root)
     last = st["round"] if st["stage"] == "done" else st["round"] - 1
+    if st["stage"] in ("done", "search"):  # v3.5: a rule change applies from a round boundary (the next round to search)
+        try:
+            rb = ensure_yield_rule(root, subs, last + 1)
+        except Exception as e:  # the old rule's history stays unscaled: comparisons are off by the factor, no more
+            print(f"  yield rule rebase failed: {str(e)[:160]}", file=sys.stderr)
+            rb = None
+        if rb:
+            print(f"yield rule {rb['from_rule']} -> {rb['rule']} from round {rb['from_round']}: corpus factor "
+                  f"{rb['factor']}, per sub-question " + ", ".join(f"S{k} x{v}" for k, v in rb["sub_factor"].items()),
+                  flush=True)
     if last >= 1 and "ypm" in round_info(root, last) and "ypm_adj" not in round_info(root, last):
         print(f"novelty: round {last} has no ypm_adj (run started before v3.4): backfilling the finished rounds",
               flush=True)
@@ -2635,6 +2747,11 @@ def cmd_run(a):
         prev = round_info(root, rnd - 1)
         if stage == "search" or not info:  # search/select is cheap to redo; selection decides everything after
             save_state(root, round=rnd, stage="search", target=target)
+            if not (root / "harvest/yield_rule.json").exists():  # a run resumed mid-round under the old rule
+                try:
+                    ensure_yield_rule(root, subs, rnd)
+                except Exception as e:
+                    print(f"  yield rule rebase failed: {str(e)[:160]}", file=sys.stderr)
             t0 = time.time()
             seen = {r["url"] for r in corpus.read_csv(src_f) if str(r.get("round")) != str(rnd)} \
                 if src_f.exists() else set()
@@ -2693,7 +2810,7 @@ def cmd_run(a):
                 if flat:
                     print("  plateaued (no queries this round): "
                           + ", ".join(f"S{k} (since round {v})" for k, v in flat.items()), flush=True)
-            a.sub_weights = sub_weights(subs, prev, rnd)
+            a.sub_weights = sub_weights(subs, prev, rnd, root)
             queries = round_queries(root, pl, subs, rnd, a, used_q, getattr(a, "note_gaps", None))
             langs = active_langs(root, pl, getattr(a, "langs", None) or [], rnd)
             lq = lang_queries(root, pl, subs, rnd, langs) if langs else []
@@ -2793,7 +2910,9 @@ def cmd_run(a):
             cum_min = mins + sum(sum((round_info(root, k).get("t") or {}).values()) for k in range(1, rnd))
             gpm = round((int(vs.get("grounded", 0) or 0) - int(info.get("grounded_before", 0) or 0)) / mins, 2)
             sub_cum = {str(k): x.get("yield", 0) for k, x in stats.items()}
-            pc = info.get("sub_base") or prev.get("sub_cum") or {}  # sub_base: this round's births re-sorted the claims
+            rb = yield_rebase(root) or {}  # v3.5: a rule change this round -> the new-rule cumulative per-sub yields
+            pc = info.get("sub_base") or (rb.get("sub_base") if int(rb.get("from_round", 0) or 0) == rnd else None) \
+                or prev.get("sub_cum") or {}  # sub_base: this round's births re-sorted the claims
             saved = max(0, int(vs.get("max_pairs", 0) or 0) - int(vs.get("judged", 0) or 0)) if vs.get("early_stop") else 0
             info.update(yield_after=y_after, new_yield=new_y, ypm=ypm, cum_ypm=round(y_after / cum_min, 3), gpm=gpm,
                         minutes=round(mins, 2), sub_cum=sub_cum,

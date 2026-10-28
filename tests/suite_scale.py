@@ -367,6 +367,7 @@ def run_corpus(*args):
 
 
 harvest.llm_json, harvest.search_all, harvest.corpus_cmd = run_llm, run_search, run_corpus
+harvest.SUB_WEIGHT_MODE = "share"  # the allocation plumbing below; v3.5 "own" mode: suite_v35_yield
 corpus.fetch_one = run_fetch
 (root / "harvest/.concurrency").write_text("48\n", encoding="utf-8")
 H = argparse.Namespace(root=root, rounds=5, subs=2, per_sub=6, pages=40, concurrency=64, max_pairs=1200,

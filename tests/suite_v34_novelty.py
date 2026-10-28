@@ -72,7 +72,8 @@ FIELDS = ["confidence", "sources", "claims", "claim", "kind", "domains", "urls",
 
 
 def cl(claim, conf, urls):
-    return {"confidence": conf, "sources": 2, "claims": 1, "claim": claim, "kind": "finding",
+    # an Orta row is single-source: with 2 sources yield rule 2 (v3.5) counts it as corroborated (0.25), not untrusted
+    return {"confidence": conf, "sources": 2 if conf == "Yüksek" else 1, "claims": 1, "claim": claim, "kind": "finding",
             "domains": "a.example, b.example", "urls": urls, "quote": "q"}
 
 

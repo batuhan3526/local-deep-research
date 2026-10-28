@@ -170,6 +170,34 @@ def scholarly(u):
         and bool(_REPO_PATH.search(p.path))
 
 
+# Practitioner primary sources (v3.5 yield rule 2): a tool's own repository, documentation, help centre or package page
+# is the primary source for what the tool does and how it is used, as a paper is for a method. Topic-agnostic: the
+# shape of the URL decides, never a topic word. Live OSINT corpus 2026-10-28: 2,900 Orta clusters backed only by such
+# pages (github.com repos 2,675, help.shodan.io, support.recordedfuture.com ...) earned no verified yield at all.
+CODE_HOSTS = frozenset("github.com gitlab.com codeberg.org bitbucket.org".split())
+PKG_HOSTS = frozenset("pypi.org npmjs.com crates.io pkg.go.dev hub.docker.com rubygems.org packagist.org".split())
+_PRAC_HOST = re.compile(r"^(help|support|kb|wiki|manual|docs?|developers?|api)\.")
+_PRAC_PATH = re.compile(r"(?i)^/([a-z]{2}(-[a-z]{2})?/)?(docs?|documentation|manual|reference|api|help|support|kb|"
+                        r"knowledge-?base|wiki|handbook|readme)(/|$|\.)")
+_REPO_PAGE = re.compile(r"^/[\w.-]+/[\w.-]+(/(blob|tree|wiki|releases|raw)(/|$)|/?$)")  # not issues / pulls / user pages
+
+
+def practitioner(u):
+    """True for a practitioner primary source: a code repository page (README / blob / tree / wiki / releases on
+    GitHub, GitLab, Codeberg, Bitbucket), a package registry page, or documentation / help-centre / knowledge-base
+    pages (docs.*, help.*, support.* hosts; /docs, /help, /kb ... paths). Never a farm or unreliable host."""
+    try:
+        p = urllib.parse.urlsplit(u.strip())
+        host = p.netloc.lower().removeprefix("www.").split(":")[0]
+        if not host or domain_prior(u.strip()) < 0:
+            return False
+    except (ValueError, AttributeError):
+        return False
+    if host in CODE_HOSTS:
+        return bool(_REPO_PAGE.match(p.path))
+    return host in PKG_HOSTS or bool(_DOCS.search(host) or _PRAC_HOST.match(host) or _PRAC_PATH.match(p.path))
+
+
 def src_class(u):
     """'unreliable' (STORM list, forbes.com/sites contributor posts), 'farm' (listed or heuristic SEO / AI-content
     blog) or '' -- the same thresholds as domain_prior, without its positive classes."""
