@@ -370,7 +370,8 @@ check("depth call: a second LLM call with the thin topics (id, claims, depth, ex
       "the general probe prompt has no thin topics",
       len(LLM["calls"]) == 2 and m is not None and f"<<<THIN-{m.group(1)}>>>" in dp[1]
       and "T1 (1225 claims, depth 0.58): Geolocation matches landmarks" in m.group(2)
-      and f"At most {harvest.PROBE_DEPTH_ASK} topics" in dp[0] and "Thin topics" not in gp
+      and f"topics worth it" in dp[0] and f"At most {harvest.PROBE_DEPTH_ASK}" in dp[0] and "Thin topics" not in gp
+      and "no existing sub-question already asks about this capability" in dp[0]
       and "2. Legal framework:" in dp[0], dp[0][-900:])
 check("depth gap: near claims do not cover it (only collected URLs do) -> born, verdict 'blind spot (depth)'",
       byd["Deep near claims"].get("verdict") == "blind spot (depth)" and byd["Deep near claims"]["uncovered"] == 1.0
@@ -393,7 +394,7 @@ byd = {g["title"]: g for g in out.get("gaps", [])}
 check("depth gap: restatement threshold PROBE_DUP_DEPTH (0.88) for depth gaps, PROBE_DUP (0.80) otherwise",
       not byd["Deeper doctrine"].get("verdict", "").startswith("restates")
       and byd["Shallow doctrine"].get("verdict", "").startswith("restates S1"), byd)
-LLM["depth"] = {"topics": [topic(i, f"Deep {i}", "T24") for i in range(1, 8)]}
+LLM["depth"] = {"topics": [topic(1 + i % 2, f"Deep {i}", "T24") for i in range(1, 8)]}
 pl, out = run_probe(resp={"gaps": []})
 check(f"depth call: at most PROBE_DEPTH_ASK ({harvest.PROBE_DEPTH_ASK}) depth gaps a round",
       out["candidates"] == harvest.PROBE_DEPTH_ASK, out["candidates"])
@@ -407,6 +408,34 @@ LLM["depth"] = {"topics": [dict(topic(1, "Query key", "T24"), queries=[{"query":
 pl, out = run_probe(resp={"gaps": []})
 check("queries with 'query' instead of 'q' are accepted (live Sage answer)",
       out["gaps"] and out["gaps"][0]["verdict"] == "blind spot (depth)", out.get("gaps"))
+OWN = [{"id": 1, "claims": 900, "depth": 0.5, "high": 0.0, "examples": ["e1", "e2"],
+        "centre": fake_embed(["T0"])[0]},                                  # = S1's text: owned
+       {"id": 2, "claims": 900, "depth": 0.5, "high": 0.0, "examples": ["e3", "e4"],
+        "centre": fake_embed(["T1"])[0]},                                  # = S1's aspect "T1 nato definitions": owned
+       {"id": 3, "claims": 900, "depth": 0.5, "high": 0.0, "examples": ["Geolocation e5", "e6"],
+        "centre": fake_embed(["T24"])[0]}]                                 # no sub-question near: free
+harvest.thin_topics = lambda root, **kw: copy.deepcopy(OWN)
+LLM["depth"] = {"topics": [topic(3, "Deep near claims", "T24")]}
+pl, out = run_probe(resp={"gaps": []})
+dp = LLM["calls"][1][0] if len(LLM["calls"]) > 1 else ""
+check("owned thin topics (centre >= PROBE_OWNED to a sub-question text or aspect) are not sent to the depth call; "
+      "the round json names their owner",
+      "T3 (900 claims" in dp and "T1 (" not in dp and "T2 (" not in dp
+      and out["thin"] == [{"id": 1, "claims": 900, "depth": 0.5, "high": 0.0, "owner": 1, "owner_sim": 1.0},
+                          {"id": 2, "claims": 900, "depth": 0.5, "high": 0.0, "owner": 1, "owner_sim": 1.0},
+                          {"id": 3, "claims": 900, "depth": 0.5, "high": 0.0}]
+      and [b["title"] for b in out["born"]] == ["Deep near claims"], (out.get("thin"), dp[-600:]))
+LLM["depth"] = {"topics": [topic(3, "Sent topic", "T24"), topic(1, "Owned topic id", "T24"),
+                           topic(25, "A sub-question id", "T24"), dict(topic(3, "No id", "T24"), thin=None)]}
+harvest.thin_topics = lambda root, **kw: copy.deepcopy(OWN)
+pl, out = run_probe(resp={"gaps": []})
+check("depth call: only gaps naming a thin topic that was sent count (not an owned one, a sub-question id or none)",
+      [g["title"] for g in out["gaps"]] == ["Sent topic"], out["gaps"])
+harvest.thin_topics = lambda root, **kw: [dict(t, centre=fake_embed(["T0"])[0]) for t in OWN[:2]]
+pl, out = run_probe(resp={"gaps": []})
+check("every thin topic owned -> no depth call at all", len(LLM["calls"]) == 1 and out["candidates"] == 0, LLM["calls"][1:])
+check("owned_thin: topics without a centre are left alone (never owned)",
+      harvest.owned_thin(BASE_PL["subquestions"], [{"id": 9}]) == [{"id": 9}])
 LLM["depth"] = None
 
 
@@ -441,12 +470,20 @@ ROWS_T = ([(f"T3 detector accuracy reaches {90 + i % 9}% on benchmark {i}", "num
 write_thin(ROWS_T)
 th = harvest.thin_topics(TT, k=3)
 check("thin_topics: the how-to-only topic (T4) is thin with depth 0, the evaluated one (T3) is not, a cluster under "
-      "max(100, THIN_MIN x claims) is ignored, Düşük claims left out",
+      "max(THIN_MIN_N, THIN_MIN x claims) is ignored, Düşük claims left out",
       len(th) == 1 and th[0]["claims"] == 600 and th[0]["depth"] == 0.0 and th[0]["id"] == 1
       and all(e.startswith("T4") for e in th[0]["examples"]) and len(th[0]["examples"]) == 2 and th[0]["high"] == 0.0, th)
-check("thin_topics: deterministic (same clusters twice)", harvest.thin_topics(TT, k=3) == th)
-write_thin(ROWS_T[:900])
-check("thin_topics: < 1000 grounded claims -> []", harvest.thin_topics(TT, k=3) == [])
+nc = lambda ts: [{k: v for k, v in t.items() if k != "centre"} for t in ts]  # noqa: E731
+th2 = harvest.thin_topics(TT, k=3)
+check("thin_topics: deterministic (same clusters twice); a unit centre vector comes with each topic",
+      nc(th2) == nc(th) and np.allclose(th2[0]["centre"], th[0]["centre"])
+      and abs(float(np.linalg.norm(th[0]["centre"])) - 1) < 1e-5 and float(th[0]["centre"] @ fake_embed(["T4"])[0]) > 0.99,
+      nc(th))
+thk = harvest.thin_topics(TT)
+check("thin_topics: k from the corpus size (1,290 claims -> THIN_K_MIN) finds the same thin topic",
+      len(thk) == 1 and thk[0]["claims"] == 600 and thk[0]["depth"] == 0.0, nc(thk))
+write_thin(ROWS_T[:450])
+check("thin_topics: < THIN_CORPUS_MIN grounded claims -> []", harvest.thin_topics(TT, k=3) == [])
 V_ = fake_embed([f"T{i % 4} x" for i in range(200)])
 lab_, c_ = harvest.kmeans(V_, 4, sample=50)
 check("kmeans: 4 separated topics -> 4 clusters, each one topic; unit centroids; sample smaller than data ok",

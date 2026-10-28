@@ -186,12 +186,22 @@ PROBE_SEARCH_MAX = 300  # s for the probe's search (SearXNG only, snippets, no f
 # clusters 0.9-1.4). geo-sleuth-style methods (skyline / DEM matching, satellite-tile and street-view matching,
 # camera pose) had 0-15 claims. Generic "OSINT is important" clusters rank shallow too: the LLM decides which thin
 # topic deserves a depth gap.
-THIN_K, THIN_SAMPLE, THIN_ITER = 80, 30000, 12  # k-means clusters, centroid sample, Lloyd iterations (seeded)
-THIN_MIN = 0.005       # a cluster needs >= this share of the grounded claims (and >= 100) to count as a topic
+THIN_K, THIN_SAMPLE, THIN_ITER = 80, 30000, 12  # max k-means clusters, centroid sample, Lloyd iterations (seeded)
+THIN_PER_K = 1350      # ~claims per cluster: k = claims / this, between THIN_K_MIN and THIN_K (108k claims -> 80; a
+THIN_K_MIN = 6         # 2.3k-claim history corpus -> 6, where a fixed 80 left every cluster under the size floor)
+THIN_MIN, THIN_MIN_N = 0.005, 50  # a cluster needs >= max(THIN_MIN_N, THIN_MIN x claims) claims to count as a topic
+THIN_CORPUS_MIN = 500  # fewer grounded claims: no thin topics (too few to tell topics apart)
 THIN_DEPTH = 0.70      # thin: depth < this x the corpus share
 THIN_TOP = 15          # thin topics shown to the probe (shallowest first)
 THIN_KINDS = ("number", "limitation")  # claim kinds that show evaluated, quantified or bounded knowledge
 PROBE_DEPTH_ASK = 4    # depth gaps per round: a separate LLM call over the thin topics (probe_depth())
+# (live round 23: it re-proposed "OSINT Geolocation Methods" next to a sub-question listing geolocation methods; MiniLM
+# put the two texts at 0.60, below any restatement threshold, and told "not if a sub-question asks it", Sage-A1.5
+# still copied that sub-question's title. So ownership is decided before the call, on the cluster centre:)
+PROBE_OWNED = 0.65     # thin-topic centre to a sub-question text / aspect: that sub-question owns it, not sent to the
+# depth call. Live, OSINT corpus after round 22: geolocation 0.52 to the best sub-question before the manual one,
+# 0.68 to it after; dark web 0.76 / 0.82 (S22), data brokers 0.74 (S19), Censys 0.68 (S16's aspect), generic
+# "OSINT is important" clusters 0.69-0.78; unowned SpiderFoot 0.58, CTI 0.58, Ukraine-war cases 0.51
 # (live 2026-10-28, Sage-A1.5: a "depth" lens among the general lenses gave 8 surface gaps, then, when told to name 3
 # depth gaps, copies of existing sub-question titles; geolocation, T11 in the digest, never came up. A call that only
 # judges the thin topics one by one does not compete with the other lenses.)
@@ -2508,7 +2518,9 @@ average). For each decide "worth": true only if (1) it is inside the brief's sco
 out of scope, (2) a complete answer to the brief needs it in depth: how it actually works (methods, algorithms,
 pipelines), open-source implementations and tools, measured accuracy / benchmarks, failure modes and limits, and
 (3) it is a concrete capability, method or technique, not a generic statement about the field (definitions,
-importance, ethics in general). At most {k} topics worth it: the ones the brief needs most. For a worth topic write a
+importance, ethics in general), and (4) no existing sub-question already asks about this capability, even in other
+words or as one of several methods it lists (then "worth": false and "why" names that sub-question). At most {k}
+topics worth it: the ones the brief needs most. For a worth topic write a
 "title" (<= 8 words, naming the capability itself), a sub-question "text" asking for that depth (one or two
 sentences), up to 5 "aspects" and 3-4 search "queries" (3-9 words each: one on measured accuracy or benchmarks, one on
 open-source implementations, one on limitations or failures). Otherwise "worth": false with a short "why".
@@ -2641,18 +2653,22 @@ def kmeans(v, k, sample=THIN_SAMPLE, iters=THIN_ITER, seed=0):
     return lab, c
 
 
-def thin_topics(root, k=THIN_K, top=THIN_TOP):
+def thin_topics(root, k=None, top=THIN_TOP):
     """v3.5: the corpus topics with the least evaluated evidence. The grounded (non-Düşük) claims are clustered
-    (kmeans() on the probe's cached claim vectors); a cluster with >= max(100, THIN_MIN x claims) claims is thin when
+    (kmeans() on the probe's cached claim vectors; k scales with the corpus, THIN_PER_K, unless given); a cluster with
+    >= max(THIN_MIN_N, THIN_MIN x claims) claims is thin when
     its depth (mean of its THIN_KINDS share and its THIN_WORDS share, each against the corpus share) < THIN_DEPTH.
     Topic-agnostic: claim kinds, field-neutral evaluation words and vectors only.
-    Returns up to `top`, shallowest first: [{id, claims, depth, high, examples (the 2 claims nearest the centre)}]."""
+    Returns up to `top`, shallowest first: [{id, claims, depth, high, examples (the 2 claims nearest the centre),
+    centre (unit vector, for owned_thin())}]."""
     import numpy as np
     f = root / "claims/claims.csv"
     rows = [r for r in corpus.read_csv(f) if (r.get("claim") or "").strip() and r.get("confidence") != "Düşük"] \
         if f.exists() else []
-    if len(rows) < 1000:  # too small a corpus for topics to be told apart
+    if len(rows) < THIN_CORPUS_MIN:  # too small a corpus for topics to be told apart
         return []
+    if k is None:
+        k = max(THIN_K_MIN, min(THIN_K, len(rows) // THIN_PER_K))
     v = probe_claim_vecs(root, [r["claim"] for r in rows])
     lab, c = kmeans(v, k)
     ev = np.array([r.get("kind") in THIN_KINDS for r in rows])
@@ -2661,7 +2677,7 @@ def thin_topics(root, k=THIN_K, top=THIN_TOP):
     avg, avg_w = float(ev.mean()), float(dw.mean())
     if avg <= 0 or avg_w <= 0:
         return []
-    floor = max(100, int(THIN_MIN * len(rows)))
+    floor = max(THIN_MIN_N, int(THIN_MIN * len(rows)))
     out = []
     for j in range(len(c)):
         idx = np.flatnonzero(lab == j)
@@ -2671,11 +2687,29 @@ def thin_topics(root, k=THIN_K, top=THIN_TOP):
         if d < THIN_DEPTH:
             near = idx[np.argsort(-(v[idx] @ c[j]))[:2]]
             out.append({"claims": int(len(idx)), "depth": round(d, 2), "high": round(float(hi[idx].mean()), 3),
-                        "examples": [rows[i]["claim"] for i in near]})
+                        "examples": [rows[i]["claim"] for i in near], "centre": c[j]})
     out.sort(key=lambda t: t["depth"])
     for i, t in enumerate(out[:top], 1):
         t["id"] = i
     return out[:top]
+
+
+def owned_thin(subs, thin):
+    """v3.5: marks thin topics a sub-question already owns: t["owner"] = its id when the topic's centre is within
+    PROBE_OWNED of the sub-question's text or one of its aspects (a sub-question asking for exactly this, maybe born
+    the round before, is still collecting). Topics without a centre are left alone. Returns the unowned ones."""
+    import numpy as np
+    from . import rt_embed
+    refs = [(s["id"], t) for s in subs for t in [s["text"]] + list(s.get("aspects") or []) if t]
+    cen = [t for t in thin if t.get("centre") is not None]
+    if refs and cen:
+        rv = _unit(rt_embed.embed([t for _, t in refs], model=rt_embed.CPU_MODEL, device="cpu"))
+        for t in cen:
+            sim = rv @ np.asarray(t["centre"], dtype=np.float32)
+            k = int(sim.argmax())
+            if float(sim[k]) >= PROBE_OWNED:
+                t["owner"], t["owner_sim"] = refs[k][0], round(float(sim[k]), 2)
+    return [t for t in thin if "owner" not in t]
 
 
 def probe_depth(root, subs, thin):
@@ -2696,9 +2730,12 @@ def probe_depth(root, subs, thin):
         print(f"  blind-spot probe: depth call failed: {str(e)[:120]}", file=sys.stderr)
         return []
     raw = (g or {}).get("topics") if isinstance(g, dict) else None
+    sent = {t["id"] for t in thin}
     out = []
     for t in raw if isinstance(raw, list) else []:
-        if isinstance(t, dict) and t.get("worth") is True:
+        # a depth gap must name a thin topic it was shown (live, Sage-A1.5: with sub-questions in the prompt it answered
+        # with their ids, T25 / T31 / T32 / T33, re-proposing them; none was a thin topic it had been sent)
+        if isinstance(t, dict) and t.get("worth") is True and t.get("thin") in sent:
             out.append({**t, "why_missing": f"thin topic T{t.get('thin', '?')}: "
                         + corpus.inline(str(t.get("why") or "few measured results, limitations or details"), 160)})
     return out[:PROBE_DEPTH_ASK]
@@ -2752,7 +2789,12 @@ def probe(root, pl, rnd, a):
         return None  # not stored in round-<fin>.json: the next run asks again
     raw = (g or {}).get("gaps") if isinstance(g, dict) else None
     gen = [{**t, "depth": False} for t in (raw if isinstance(raw, list) else []) if isinstance(t, dict)][:PROBE_ASK]
-    deep = [{**t, "depth": True} for t in probe_depth(root, subs, thin)]  # v3.5: the depth gaps, judged alike
+    try:
+        free = owned_thin(subs, thin)
+    except Exception as e:  # without the ownership test the LLM still sees the sub-questions
+        print(f"  blind-spot probe: thin-topic ownership failed: {str(e)[:120]}", file=sys.stderr)
+        free = thin
+    deep = [{**t, "depth": True} for t in probe_depth(root, subs, free)]  # v3.5: the depth gaps, judged alike
     cands = []
     for t in gen + deep:
         title, text = corpus.inline(str(t.get("title") or ""), 120), corpus.inline(str(t.get("text") or ""), 600)
@@ -2839,7 +2881,8 @@ def probe(root, pl, rnd, a):
     out["gaps"] = [{k: c[k] for k in ("title", "why_missing", "depth", "hits", "domains", "uncovered", "verdict")
                     if k in c} for c in cands]
     if thin:
-        out["thin"] = [{k: t[k] for k in ("id", "claims", "depth", "high")} for t in thin]
+        out["thin"] = [{k: t[k] for k in ("id", "claims", "depth", "high", "owner", "owner_sim") if k in t}
+                       for t in thin]
     if out["born"]:
         save_plan(root, pl)
     return out
