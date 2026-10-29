@@ -464,6 +464,27 @@ check("corroboration order: the cluster with a trusted / primary own source goes
 (croot / "claims/.corroborated.jsonl").unlink(); order_j.clear()
 corpus.corroborate(corpus.cluster_claims(croot), k=6, conc=1, stop_window=5, stop_lift=0.03)
 check("corroboration early stop: last 5 judgements lifted 0 -> stop after 5 (of 12)", len(order_j) == 5, len(order_j))
+# sweep (prio): no fixed window. A cluster whose k passages were judged in earlier batches is skipped and the walk
+# goes on to the next one (live: a 5,000-cluster window filled with exhausted clusters, the lift fell, the sweep
+# stopped as "saturated" after touching 11k of 140k clusters). Window 1 (CORR_TODO_MAX) makes the old stall visible.
+(croot / "claims/.corroborated.jsonl").unlink(); order_j.clear()
+todo0, corpus.CORR_TODO_MAX = corpus.CORR_TODO_MAX, 1
+for _ in range(2):  # usual order, window 1: the trusted "Paper" cluster, one pair each -> k=2 judged
+    corpus.corroborate(corpus.cluster_claims(croot), k=2, max_pairs=1, conc=1, stop_window=0)
+paper_only = list(order_j)
+order_j.clear()
+prio = {"Paper: purged walk forward with embargo removes label leakage": 1.0}
+corpus.corroborate(corpus.cluster_claims(croot), k=2, max_pairs=1, conc=1, stop_window=0, prio=prio)
+check("sweep (prio): the cluster with k judged passages is skipped, the next one in the order gets the pair "
+      "(window 1 would have sent nothing)",
+      len(paper_only) == 2 and all(x.startswith("Paper:") for x in paper_only)
+      and len(order_j) == 1 and order_j[0].startswith("Blog:"), (paper_only, order_j))
+order_j.clear()
+corpus.corroborate(corpus.cluster_claims(croot), k=2, max_pairs=1, conc=1, stop_window=0)
+check("usual order (rounds) keeps its fixed window: the exhausted cluster still holds it, nothing sent",
+      order_j == [], order_j)
+corpus.CORR_TODO_MAX = todo0
+(croot / "claims/.corroborated.jsonl").unlink(); order_j.clear()
 corpus.cmd_verify(argparse.Namespace(root=croot, max_pairs=100, concurrency=1, k=6, stop_window=4, stop_lift=0.03))
 vs = json.loads((croot / "claims/.verify_stats.json").read_text(encoding="utf-8"))
 check("verify writes .verify_stats.json (claims, grounded, corr seconds, judged, early stop)",

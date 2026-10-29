@@ -1747,6 +1747,7 @@ CORR_LIFT_STOP = True  # a cluster lifted to Yüksek sends no more pairs (costs 
 CORR_STOP_WINDOW, CORR_STOP_LIFT = 200, 0.03  # stop a run when the last 200 judgements lifted < 3% (yield/minute)
 CORR_TODO_MAX, CORR_CAND = 4000, 3000  # clusters considered per run (best expected lift first); passages ranked each
 CORR_BLOCK = 64  # clusters per cosine matmul block (64 x 400k float32 ~ 100 MB)
+CORR_EMB_CHUNK = 2048  # sweep (prio): cluster heads embedded per step while walking the order
 
 
 CONF_RULE = 2  # 1 = 2+ independent sources; 2 = + an anchor source (v3.1); harvest rebases its yield metric on a change
@@ -1778,52 +1779,16 @@ def corr_order(todo, own_tr, prio=None):
     return sorted(todo, key=lambda cl: (not own_tr[cl["key"]], -len(cl["members"])))
 
 
-def corroborate(st, k=CORR_K, max_pairs=CORR_MAX_PAIRS, conc=48, stop_window=None, stop_lift=None, prio=None):
-    """Grounded clusters with < 2 independent sources: retrieve passages from OTHER source groups (BM25 + MiniLM,
-    reciprocal-rank fusion), ask the LLM supports / contradicts / unrelated with a verbatim quote, ground the quote in
-    that page. Every judged pair is appended (fsync'd) to claims/.corroborated.jsonl and never judged again.
-    Yüksek clusters are skipped; pairs go out best-first (every cluster's most similar passage before anyone's
-    second); a cluster lifted by a grounded support sends no more pairs; max_pairs counts pairs actually sent.
-    Yield order (2026-10-18 scale): clusters whose own source is trusted / primary first (their lift is worth most),
-    then by size; within a rank, pairs by cosine + trusted bonuses. At most CORR_TODO_MAX clusters and, per cluster,
-    the CORR_CAND best passages by cosine and by BM25 are ranked (bounded kNN, never all clusters x all passages).
-    The run stops early when the last stop_window judgements lifted fewer than stop_lift of them; st["corr_stats"]
-    records judged / lifted / early stop for harvest (unused budget -> more pages next round). prio (v3.5 final sweep,
-    {head claim: score} from harvest.sweep_priority): clusters are taken in that order instead (unscored last)."""
-    stop_window = CORR_STOP_WINDOW if stop_window is None else stop_window
-    stop_lift = CORR_STOP_LIFT if stop_lift is None else stop_lift
-    st["corr_stats"] = {"judged": 0, "lifted": 0, "early_stop": False, "max_pairs": max_pairs}
-    cache_f = st["out"] / ".corroborated.jsonl"
-    seen = {(r.get("cluster"), r.get("url"), r.get("pos")) for r in (read_jsonl(cache_f) if cache_f.exists() else [])
-            if isinstance(r, dict)}
-    corr = corr_results(st)
-    todo = [cl for cl, c in zip(st["clusters"], confidences(st, corr)) if c == "Orta"]
-    urls = [u for u in st["corpus"] if st["inj"].get(u, 0) < INJ_FLAG]
-    if not todo or not urls:
-        return 0
-    own_tr = {cl["key"]: any(trusted_src(c["url"]) for c in cl["ok"]) for cl in todo}
-    todo = corr_order(todo, own_tr, prio)
-    todo = todo[:max(CORR_TODO_MAX, max_pairs)]
-    meta, pv = passages(st["root"], urls)
-    if not meta:
-        return 0
-    g = st["group"]
-    ids = lambda xs: np.unique(np.array(xs), return_inverse=True)  # noqa: E731  strings -> int codes (fast isin)
-    dnames, dom = ids([domain(m["url"]) for m in meta])
-    gnames, grp = ids([g.get(m["url"], m["url"]) for m in meta])
-    dix, gix = {d: i for i, d in enumerate(dnames)}, {x: i for i, x in enumerate(gnames)}
-    by_url = {}
-    for m in meta:
-        by_url.setdefault(m["url"], (bool(src_class(m["url"])), trusted_src(m["url"])))
-    farm = np.array([by_url[m["url"]][0] for m in meta])  # a farm support counts 0: not worth a judge call
-    tr = np.array([by_url[m["url"]][1] for m in meta])
-    bm = BM25([toks(m["text"]) for m in meta])
-    qv = np.asarray(embed_cached([cl["head"]["claim"] for cl in todo], st["out"] / ".headvec", CPU_MODEL, "cpu"),
-                    dtype=np.float32)
-    pv = np.asarray(pv, dtype=np.float32)
-    rank = lambda x: np.argsort(np.argsort(-x))  # noqa: E731
+def corr_pairs(todo, qv, pv, meta, dom, grp, dix, gix, farm, tr, bm, own_tr, corr, g, seen, k, rank, stop_at=None,
+               have=0):
+    """corroborate()'s candidate pairs (round-robin rank, -score, cluster, passage) for clusters todo (head vectors
+    qv), in CORR_BLOCK cosine blocks: per cluster its k best passages (RRF of cosine and BM25) from other source
+    groups, the already judged ones counted but not returned. stop_at: stop after the block in which have + the
+    pairs found reach it (the sweep walks the clusters in priority order until its budget is filled)."""
     pairs = []
     for b0 in range(0, len(todo), CORR_BLOCK):
+        if stop_at is not None and have + len(pairs) >= stop_at:
+            break
         C = qv[b0:b0 + CORR_BLOCK] @ pv.T
         for r, cl in enumerate(todo[b0:b0 + CORR_BLOCK]):
             own = {c["url"] for c in cl["ok"]} | corr.get(cl["key"], (set(), {}))[0]
@@ -1850,6 +1815,69 @@ def corroborate(st, k=CORR_K, max_pairs=CORR_MAX_PAIRS, conc=48, stop_window=Non
                     pairs.append((sum(per.values()), -(float(cos[j]) + bonus + 0.05 * bool(tr[cand[j]])), cl, m))
                 if sum(per.values()) >= k:
                     break
+    return pairs
+
+
+def corroborate(st, k=CORR_K, max_pairs=CORR_MAX_PAIRS, conc=48, stop_window=None, stop_lift=None, prio=None):
+    """Grounded clusters with < 2 independent sources: retrieve passages from OTHER source groups (BM25 + MiniLM,
+    reciprocal-rank fusion), ask the LLM supports / contradicts / unrelated with a verbatim quote, ground the quote in
+    that page. Every judged pair is appended (fsync'd) to claims/.corroborated.jsonl and never judged again.
+    Yüksek clusters are skipped; pairs go out best-first (every cluster's most similar passage before anyone's
+    second); a cluster lifted by a grounded support sends no more pairs; max_pairs counts pairs actually sent.
+    Yield order (2026-10-18 scale): clusters whose own source is trusted / primary first (their lift is worth most),
+    then by size; within a rank, pairs by cosine + trusted bonuses. At most CORR_TODO_MAX clusters and, per cluster,
+    the CORR_CAND best passages by cosine and by BM25 are ranked (bounded kNN, never all clusters x all passages).
+    The run stops early when the last stop_window judgements lifted fewer than stop_lift of them; st["corr_stats"]
+    records judged / lifted / early stop for harvest (unused budget -> more pages next round). prio (v3.5 final sweep,
+    {head claim: score} from harvest.sweep_priority): clusters are taken in that order instead (unscored last)."""
+    stop_window = CORR_STOP_WINDOW if stop_window is None else stop_window
+    stop_lift = CORR_STOP_LIFT if stop_lift is None else stop_lift
+    st["corr_stats"] = {"judged": 0, "lifted": 0, "early_stop": False, "max_pairs": max_pairs}
+    cache_f = st["out"] / ".corroborated.jsonl"
+    seen = {(r.get("cluster"), r.get("url"), r.get("pos")) for r in (read_jsonl(cache_f) if cache_f.exists() else [])
+            if isinstance(r, dict)}
+    corr = corr_results(st)
+    todo = [cl for cl, c in zip(st["clusters"], confidences(st, corr)) if c == "Orta"]
+    urls = [u for u in st["corpus"] if st["inj"].get(u, 0) < INJ_FLAG]
+    if not todo or not urls:
+        return 0
+    own_tr = {cl["key"]: any(trusted_src(c["url"]) for c in cl["ok"]) for cl in todo}
+    todo = corr_order(todo, own_tr, prio)
+    if not prio:
+        todo = todo[:max(CORR_TODO_MAX, max_pairs)]
+    else:  # the corpus does not grow during the sweep: a cluster with k judged passages has no pair left to send
+        nseen = collections.Counter(c for c, _, _ in seen)
+        todo = [cl for cl in todo if nseen[cl["key"]] < k]
+    # prio (the sweep): no fixed window. A window of the first N clusters filled up with clusters whose passages were
+    # all judged in earlier batches (live: 40k pairs over 8 batches touched 11k of 140k clusters, 4.7k of them at k
+    # judged pairs) and the falling lift looked like saturation. Clusters are taken in order until the pair budget
+    # (+ headroom) is filled, so each batch moves on to the next ones.
+    meta, pv = passages(st["root"], urls)
+    if not meta:
+        return 0
+    g = st["group"]
+    ids = lambda xs: np.unique(np.array(xs), return_inverse=True)  # noqa: E731  strings -> int codes (fast isin)
+    dnames, dom = ids([domain(m["url"]) for m in meta])
+    gnames, grp = ids([g.get(m["url"], m["url"]) for m in meta])
+    dix, gix = {d: i for i, d in enumerate(dnames)}, {x: i for i, x in enumerate(gnames)}
+    by_url = {}
+    for m in meta:
+        by_url.setdefault(m["url"], (bool(src_class(m["url"])), trusted_src(m["url"])))
+    farm = np.array([by_url[m["url"]][0] for m in meta])  # a farm support counts 0: not worth a judge call
+    tr = np.array([by_url[m["url"]][1] for m in meta])
+    bm = BM25([toks(m["text"]) for m in meta])
+    pv = np.asarray(pv, dtype=np.float32)
+    rank = lambda x: np.argsort(np.argsort(-x))  # noqa: E731
+    pairs = []
+    step = CORR_EMB_CHUNK if prio else max(1, len(todo))  # heads embedded per chunk (prio walks on until full)
+    for c0 in range(0, len(todo), step):
+        if prio and len(pairs) >= max_pairs * 3:
+            break
+        part = todo[c0:c0 + step]
+        qv = np.asarray(embed_cached([cl["head"]["claim"] for cl in part], st["out"] / ".headvec", CPU_MODEL, "cpu"),
+                        dtype=np.float32)
+        pairs += corr_pairs(part, qv, pv, meta, dom, grp, dix, gix, farm, tr, bm, own_tr, corr, g, seen, k, rank,
+                            stop_at=max_pairs * 3 if prio else None, have=len(pairs))
     pairs.sort(key=lambda x: x[:2])  # round robin: every cluster's best passage before anyone's second
     pairs = pairs[:max_pairs * 3]  # headroom for pairs skipped at send time (lifted clusters)
     jobs, txt = [], {}
