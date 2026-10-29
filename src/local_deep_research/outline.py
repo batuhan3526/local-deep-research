@@ -277,28 +277,34 @@ def main(argv=None):
     print(f"outline: {sum(map(len, packs.values()))} clusters in {len(packs)} packs -> {len(jobs)} theme calls")
     t0 = time.monotonic()
     themes = {n: {} for n in packs}
+    cp = corpus.Checkpoint(root, "outline")  # STOP: theme calls / merges not yet started are skipped (cached ones kept)
     with cf.ThreadPoolExecutor(a.concurrency) as ex:
-        futs = {ex.submit(themes_for_chunk, subs[n]["text"], c, lang, root / f"analysis/.outline/s{n}-c{k}.json"):
+        futs = {ex.submit(cp.wrap(themes_for_chunk), subs[n]["text"], c, lang, root / f"analysis/.outline/s{n}-c{k}.json"):
                 (n, k) for n, k, c in jobs}
         for f in cf.as_completed(futs):
             n, k = futs[f]
-            for j, t in enumerate(f.result(), 1):
+            for j, t in enumerate(cp.result(f) or [], 1):
                 themes[n][f"c{k}t{j}"] = t
+        cp.check()  # a merge over a partial theme set would cache the wrong sub-topics
         print(f"  themes: {sum(map(len, themes.values()))} in {time.monotonic() - t0:.0f}s")
         # the merge is cached too: a restart must not reshuffle the sub-topic keys S<n>.<k> agents already used
         mh = {n: hashlib.sha256(json.dumps([lang, subs[n]["text"], sorted(themes[n].items())]).encode()).hexdigest()[:16]
               for n in packs}
         todo = [n for n in packs if cached_merge(root / f"analysis/s{n}-outline.json") != mh[n]]
-        futs = {ex.submit(merge, subs[n], packs[n], dict(sorted(themes[n].items())), lang): n for n in todo}
+        futs = {ex.submit(cp.wrap(merge), subs[n], packs[n], dict(sorted(themes[n].items())), lang): n for n in todo}
         for f in cf.as_completed(futs):
             n = futs[f]
-            out = {"hash": mh[n], **f.result()}
+            r = cp.result(f)
+            if r is None:
+                continue
+            out = {"hash": mh[n], **r}
             placed = [i for s in out["subtopics"] for i in s["ids"]] + [i for x in out["appendix_only"] for i in x["ids"]]
             assert sorted(placed) == sorted(r["id"] for r in packs[n]), f"S{n}: ids lost or repeated"
             corpus.atomic_write(root / f"analysis/s{n}-outline.json", json.dumps(out, ensure_ascii=False, indent=1))
             corpus.atomic_write(root / f"analysis/s{n}-outline.md", render(subs[n], packs[n], out))
             print(f"  S{n}: {len(packs[n])} clusters -> {len(out['subtopics'])} sub-topics, "
                   f"{sum(len(x['ids']) for x in out['appendix_only'])} appendix-only")
+        cp.check()
     print(f"outline done in {time.monotonic() - t0:.0f}s ({len(packs) - len(todo)} merges cached) -> "
           f"{root}/analysis/s<n>-outline.md")
     return 0

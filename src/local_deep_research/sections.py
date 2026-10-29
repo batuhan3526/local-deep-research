@@ -224,10 +224,13 @@ def cmd_analyze(root, conc):
     print(f"analyze: {len(jobs)} sub-topics in {len(outl)} sub-questions")
     t0 = time.monotonic()
     blocks = {}
+    cp = corpus.Checkpoint(root, "analyze")  # STOP: sub-topics not yet started are skipped (done ones are cached)
     with cf.ThreadPoolExecutor(conc) as ex:
-        futs = {ex.submit(analyze_topic, root, n, subs[n], s, packs.get(n, []), brief, lang): (n, s["key"]) for n, s in jobs}
+        futs = {ex.submit(cp.wrap(analyze_topic), root, n, subs[n], s, packs.get(n, []), brief, lang): (n, s["key"])
+                for n, s in jobs}
         for f in cf.as_completed(futs):
-            blocks[futs[f]] = f.result()
+            blocks[futs[f]] = cp.result(f)
+        cp.check()  # the summaries need every block
         print(f"  blocks done in {time.monotonic() - t0:.0f}s")
 
         def summary(n):
@@ -249,8 +252,10 @@ def cmd_analyze(root, conc):
                   + oz.strip() + "\n\n## Outline\n\n" + "\n\n".join(b.strip() for b in bl) + "\n")
             corpus.atomic_write(root / f"analysis/s{n}.md", md)
             return n
-        for f in cf.as_completed([ex.submit(summary, n) for n in sorted(outl)]):
-            print(f"  analysis/s{f.result()}.md")
+        for f in cf.as_completed([ex.submit(cp.wrap(summary), n) for n in sorted(outl)]):
+            if (n := cp.result(f)) is not None:
+                print(f"  analysis/s{n}.md")
+        cp.check()
     print(f"analyze done in {time.monotonic() - t0:.0f}s")
 
 
@@ -306,20 +311,22 @@ def cmd_write(root, conc):
     jobs = [(n, mm, s) for n in sorted(outl) for mm, s in enumerate(outl[n]["subtopics"], 1)]
     print(f"write: {len(jobs)} sections")
     t0 = time.monotonic()
+    cp = corpus.Checkpoint(root, "write")  # STOP: sections not yet started are skipped (written ones are cached)
     with cf.ThreadPoolExecutor(conc) as ex:
-        futs = [ex.submit(write_topic, root, n, mm, subs[n], s, packs.get(n, []), ctx) for n, mm, s in jobs]
+        futs = [ex.submit(cp.wrap(write_topic), root, n, mm, subs[n], s, packs.get(n, []), ctx) for n, mm, s in jobs]
         intro = {}
         for n in sorted(outl):  # intros: small calls, done alongside
             oz = re.search(r"(?ms)^## Özet\s*$.*?(?=^## |\Z)", ctx["analysis"].get(n, ""))
             p = INTRO_PROMPT.format(n=n, sub=subs[n]["text"], ozet=(oz.group(0) if oz else "")[:4000], lang=lang,
                                     title=corpus.inline(subs[n].get("title", f"S{n}"), 120),
                                     titles="; ".join(s["title"] for s in outl[n]["subtopics"]))
-            intro[n] = ex.submit(ask, p, 1500, "section-intro")
-        names = [f.result() for f in futs]
+            intro[n] = ex.submit(cp.wrap(ask), p, 1500, "section-intro")
+        names = [cp.result(f) for f in futs]
+        cp.check()  # before the intros: a skipped intro must not be written as a bare title
         for n, fu in intro.items():
             f = root / f"report/{n:02d}-00-{slug(subs[n].get('title', f's{n}'))}.md"
             if not f.exists():
-                t = strip_think(fu.result() or f"# {subs[n].get('title', f'S{n}')}\n")
+                t = strip_think(cp.result(fu) or f"# {subs[n].get('title', f'S{n}')}\n")
                 if not t.startswith("# "):
                     t = f"# {subs[n].get('title', f'S{n}')}\n\n{t}"
                 corpus.atomic_write(f, t.strip() + "\n")

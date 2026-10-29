@@ -288,10 +288,14 @@ def main(argv=None):
     print(f"verify_fix: {len(files)} section files")
     t0 = time.monotonic()
     res = {}
+    cp = corpus.Checkpoint(root, "verify")  # STOP: files not yet checked are skipped (checked ones are cached)
     with cf.ThreadPoolExecutor(a.concurrency) as ex:
-        futs = {ex.submit(check_file, root, f, outl, packs, claims, local, local_nums, brief, lang): f.name for f in files}
+        futs = {ex.submit(cp.wrap(check_file), root, f, outl, packs, claims, local, local_nums, brief, lang): f.name
+                for f in files}
         for fu in cf.as_completed(futs):
-            res[futs[fu]] = fu.result()
+            if (r := cp.result(fu)) is not None:
+                res[futs[fu]] = r
+        cp.check()  # the notes below need every file
     print(f"  checked in {time.monotonic() - t0:.0f}s: flags {sum(len(r['flags']) for r in res.values())}, "
           f"edits applied {sum(len(r['applied']) for r in res.values())}, "
           f"rejected {sum(len(r['rejected']) for r in res.values())}, "

@@ -3229,6 +3229,7 @@ def cmd_run(a):
                   f"{by_src['domains']} domains, fetching\n"
                   f"  by backend: candidates {by_src['cands']}, selected {by_src['sel']}; by language {by_src['langs']}",
                   flush=True)
+        pool_pause(root, a, "fetch")
         if stage == "fetch":
             t0 = time.time()
             got, ok, tried = fetch(info["sel"])
@@ -3240,12 +3241,14 @@ def cmd_run(a):
             save_state(root, round=rnd, stage=stage, target=target)
             print(f"  {len(got)} with text ({ok}/{tried} newly fetched), {len(info['links'])} one-hop link candidates "
                   f"for the next round; extracting", flush=True)
+        pool_pause(root, a, "extract")
         if stage == "extract":
             t0 = time.time()
             corpus_cmd("extract", str(root), "--concurrency", str(live_concurrency(root, a.concurrency)))
             tick(info, "extract", t0); corpus.atomic_write(rf, json.dumps(info, ensure_ascii=False))
             stage = "verify"
             save_state(root, round=rnd, stage=stage, target=target)
+        pool_pause(root, a, "verify")
         if stage == "verify":
             t0 = time.time()
             conc = live_concurrency(root, a.concurrency)
@@ -3517,6 +3520,15 @@ def sweep_priority(root, subs):
             continue
         out[r["claim"]] = round(float(rel[i] * need[best[i]]) + (SWEEP_KIND_BONUS if r.get("kind") in THIN_KINDS else 0), 4)
     return out
+
+
+def pool_pause(root, a, stage):
+    """the sweep's pool round (a.pool_only): a STOP file pauses it before each stage (fetch / extract / verify); the
+    stage is in harvest/state.json, so `ldr run` resumes there. Normal rounds pause between rounds only."""
+    if getattr(a, "pool_only", False) and load_state(root).get("stage") == stage and corpus.pause_requested(root):
+        print(f"  stop requested (STOP file): sweep pool round paused before {stage}; `ldr run` resumes here",
+              flush=True)
+        raise KeyboardInterrupt
 
 
 def sweep_stop(batches, pairs, max_batches):

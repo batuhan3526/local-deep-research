@@ -149,6 +149,9 @@ def run_llm(prompt, max_tokens=6000, system=None):
 
 def run_search(queries, grace=None, cap=None):
     RUN["searched"].append(list(queries))
+    if RUN.get("stop_on_search"):  # a STOP that appears while a round searches
+        RUN["stop_on_search"] = False
+        (RUN["root"] / "STOP").write_text("", encoding="utf-8")
     n = len(RUN["searched"])
     return [{"url": f"https://s{n}-{j}-{i}.org/p", "title": f"T{qq[0] - 1} page {qq[1]} {i}", "snippet": "x",
              "year": "", "src": "web", "sub": qq[0], "query": qq[1]} for j, qq in enumerate(queries) for i in range(3)]
@@ -301,6 +304,29 @@ check("sweep resumed after the last batch already ended it: no new verify batch,
       not [c for c in RUN["corpus"] if c[0] == "verify" and "--priority" in c] and sw5b["verify"]["batches"] == 2
       and sw5b["verify"]["stop"].startswith("candidates exhausted") and VQ == [(500, 1)], sw5b)
 VQ.clear()
+# pool round: a STOP pauses it before its next stage (fetch here); the resumed sweep finishes that round
+H6 = new_run("sw-pool-stop")
+harvest.cmd_run(H6)
+S6 = argparse.Namespace(**{**vars(S), "root": RUN["root"], "again": False, "pairs": 500})
+RUN["stop_on_search"] = True
+try:
+    harvest.cmd_sweep(S6)
+    paused = False
+except KeyboardInterrupt:
+    paused = True
+st6 = harvest.load_state(RUN["root"])
+sw6 = json.loads((RUN["root"] / "harvest/sweep.json").read_text(encoding="utf-8"))
+check("sweep pool round: STOP during its search -> paused before fetch (stage kept), verify part already done",
+      paused and st6 == {**st6, "round": 2, "stage": "fetch"} and "verify" in sw6 and "pool" not in sw6
+      and not (RUN["root"] / "STOP").exists(), (st6, sw6))
+harvest.cmd_sweep(S6)
+sw6 = json.loads((RUN["root"] / "harvest/sweep.json").read_text(encoding="utf-8"))
+check("sweep pool round resumed at fetch: round 2 finished, pool recorded",
+      sw6.get("pool", {}).get("round") == 2 and harvest.load_state(RUN["root"])["stage"] == "done"
+      and sum(1 for c in RUN["corpus"] if c[0] == "extract") >= 2, sw6)
+r1x = ri(RUN["root"], 1)
+check("normal rounds: no stage checkpoint (pool_pause only for the pool round)",
+      harvest.pool_pause(RUN["root"], argparse.Namespace(), "fetch") is None)
 
 # ---------- 4. pipeline phase ----------
 names = [p.name for p in pipeline.phases()]

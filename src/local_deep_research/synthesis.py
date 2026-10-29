@@ -315,15 +315,18 @@ def report_parts(root, concurrency=None):
     conc = int(concurrency or getattr(config.get(), "llm_concurrency", 16) or 16)
     print(f"synthesis: {len(todo)} report parts to write")
     failed = 0
+    cp = corpus.Checkpoint(root, "report parts")  # STOP: parts not yet started are skipped (written ones stay)
     with cf.ThreadPoolExecutor(max(1, min(conc, len(todo) or 1))) as ex:
-        futs = {ex.submit(counter, root, s, L, lng) if k == "counter" else
-                ex.submit(summary, root, L, lng) if k == "summary" else ex.submit(conflicts, root, L, lng):
+        futs = {ex.submit(cp.wrap(counter), root, s, L, lng) if k == "counter" else
+                ex.submit(cp.wrap(summary), root, L, lng) if k == "summary" else ex.submit(cp.wrap(conflicts), root, L, lng):
                 (k, s and s["id"]) for k, s in todo}
         for fu in cf.as_completed(futs):
             try:
-                print(f"  report/{fu.result()}")
+                if (r := cp.result(fu)) is not None:
+                    print(f"  report/{r}")
             except llm.LLMError as e:
                 failed += 1; print(f"  {futs[fu]} failed: {e}", file=sys.stderr)
+        cp.check()
     return failed
 
 

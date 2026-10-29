@@ -317,8 +317,11 @@ download them again.
 ### Pausing and extending a run
 
 - **Pause cleanly.** `touch <topic>/research/STOP` (or press Ctrl-C). The run stops at the next clean boundary —
-  between harvest rounds or between phases, never mid-round — and `ldr run <topic>` resumes from there. The STOP
-  file is consumed, so the resumed run does not stop again at once.
+  between harvest rounds or between phases, never mid-round — and `ldr run <topic>` resumes from there. The long
+  phases also have checkpoints inside: the final sweep pauses between its corroboration batches and before each
+  stage of its pool round; outline, analyze, write, report parts and verify stop starting new items, let the ones in
+  flight finish (they are cached) and pause before the step that needs them all. The STOP file is consumed, so the
+  resumed run does not stop again at once.
 - **Add rounds** (mainly the `dinamik` profile, which keeps going while each round still yields and stops after two
   weak rounds in a row, up to its round ceiling): raise the ceiling and resume with
   `ldr run <topic> --max-rounds N`. `ldr status <topic>` shows the harvest yield per round, so you can see whether

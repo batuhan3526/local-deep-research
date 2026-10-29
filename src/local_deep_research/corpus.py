@@ -333,6 +333,44 @@ def pause_requested(root, consume=True):
     return True
 
 
+class Paused(Exception):
+    """a work item not started because a STOP file appeared (Checkpoint)"""
+
+
+class Checkpoint:
+    """A graceful STOP inside a long phase (sweep, report phases): checkpoints between its work items. wrap(fn) runs
+    fn unless <root>/STOP exists, else raises Paused: items not yet started are skipped, items in flight finish and
+    keep their cached results. result(future) -> the result, or None for a skipped item. check() between the steps
+    of a phase: anything skipped (or STOP present) -> STOP consumed, KeyboardInterrupt (the pipeline logs
+    "interrupted"; `ldr run` resumes the phase and its cached items are not redone)."""
+
+    def __init__(self, root, what):
+        self.root, self.what, self.skipped = pathlib.Path(root), what, 0
+        self._lock = threading.Lock()
+
+    def wrap(self, fn):
+        def run(*a, **k):
+            if self.skipped or pause_requested(self.root, consume=False):
+                with self._lock:
+                    self.skipped += 1
+                raise Paused
+            return fn(*a, **k)
+        return run
+
+    def result(self, fu):
+        try:
+            return fu.result()
+        except Paused:
+            return None
+
+    def check(self):
+        if self.skipped or pause_requested(self.root, consume=False):
+            pause_requested(self.root)
+            print(f"  stop requested (STOP file): {self.what} paused at a checkpoint ({self.skipped} items left); "
+                  f"`ldr run` resumes here", flush=True)
+            raise KeyboardInterrupt
+
+
 def open_append(path):
     """Append handle that first terminates a torn last line (crash mid-write), so the next record stays parseable."""
     torn = False
