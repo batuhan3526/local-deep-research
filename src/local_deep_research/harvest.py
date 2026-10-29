@@ -197,9 +197,14 @@ THIN_KINDS = ("number", "limitation")  # claim kinds that show evaluated, quanti
 # v3.5 final sweep (cmd_sweep, pipeline phase "sweep" between harvest and notes): what the rounds left unprocessed.
 # Live OSINT run after round 23: 113k single-source Orta clusters, but each round's corroboration judged ~400 pairs
 # (it stops when the last 200 lift < 3%) of the 4,000 clusters it ranks by own-source trust and size only; 25k
-# selected-worthy candidates sat in the carry pool. The sweep corroborates SWEEP_PAIRS pairs in importance order
-# (sweep_priority) without the early stop, then runs one round that searches nothing and picks from the pool.
-SWEEP_PAIRS = 10000    # ~1.5 h at the live ~2 judgements / s
+# selected-worthy candidates sat in the carry pool. The sweep corroborates in importance order (sweep_priority)
+# without the in-run early stop, then runs one round that searches nothing and picks from the pool.
+# Corroboration runs "until saturation": batches of SWEEP_PAIRS pairs (judged pairs are cached, never re-judged, so
+# each batch takes the next ones; the priority is re-scored between batches as lifts fill sub-questions), stopping
+# after a batch that lifted < SWEEP_STOP_LIFT of its judgements or judged fewer pairs than asked (no candidates left).
+SWEEP_PAIRS = 5000     # pairs per batch, ~40 min at the live ~2 judgements / s
+SWEEP_STOP_LIFT = 0.03  # = the round verify's early-stop rate (corpus.CORR_STOP_LIFT)
+SWEEP_MAX_BATCHES = 40  # safety ceiling only (200k pairs, ~28 h)
 SWEEP_KIND_BONUS = 0.1  # a number / limitation claim (THIN_KINDS) first among equally relevant ones
 PROBE_DEPTH_ASK = 4    # depth gaps per round: a separate LLM call over the thin topics (probe_depth())
 # (live round 23: it re-proposed "OSINT Geolocation Methods" next to a sub-question listing geolocation methods; MiniLM
@@ -3146,6 +3151,20 @@ def cmd_run(a):
                 corpus.atomic_write(round_file(root, rnd - 1), json.dumps(prev, ensure_ascii=False))
             if births:
                 sub_base = births[-1].get("sub_base")
+            ids = {str(s["id"]) for s in subs}
+            gone = sorted(set(prev.get("sub_cum") or {}) - ids, key=int) if rnd > 1 else []
+            if gone and (sub_base is None or set(sub_base) - ids):
+                # sub-questions taken out of the plan (by hand: duplicates): their claims re-sort onto the remaining
+                # ones, so round rnd-1's sub_cum is no base for them (live r29: S22 +5 -> +138). Re-based once, like
+                # a birth, and stored with round rnd-1 (a resumed search re-uses it)
+                dr = prev.get("dropped") or {}
+                if dr.get("ids") != gone or not dr.get("sub_base"):
+                    dr = {"ids": gone, "sub_base": {str(k): x.get("yield", 0) for k, x in packs(root, subs).items()}}
+                    prev["dropped"] = dr
+                    corpus.atomic_write(round_file(root, rnd - 1), json.dumps(prev, ensure_ascii=False))
+                    print(f"  sub-questions left the plan after round {rnd - 1}: "
+                          + ", ".join(f"S{k}" for k in gone) + "; per-sub yields re-based", flush=True)
+                sub_base = dr["sub_base"]
             if rnd > 1:
                 flat = plateaus(root, subs, rnd - 1)
                 save_plan(root, pl)
@@ -3500,9 +3519,25 @@ def sweep_priority(root, subs):
     return out
 
 
+def sweep_stop(batches, pairs, max_batches):
+    """why the sweep's corroboration stops after these batches ({judged, lifted} each), None = run another: the last
+    batch judged fewer than `pairs` (no candidates left) or lifted < SWEEP_STOP_LIFT of its judgements, or the
+    max_batches ceiling"""
+    if batches:
+        x = batches[-1]
+        if int(x["judged"]) < pairs:
+            return f"candidates exhausted ({x['judged']} < {pairs} pairs)"
+        if x["lifted"] / max(1, x["judged"]) < SWEEP_STOP_LIFT:
+            return f"saturated (lift {x['lifted'] / max(1, x['judged']):.1%} < {SWEEP_STOP_LIFT:.0%})"
+    if len(batches) >= max_batches:
+        return f"ceiling {max_batches} batches"
+    return None
+
+
 def cmd_sweep(a):
-    """v3.5 final sweep, once after the harvest rounds (pipeline phase "sweep"): (1) corroboration of up to a.pairs
-    pairs in sweep_priority() order without the early stop (no new pages); (2) one round that runs no search and
+    """v3.5 final sweep, once after the harvest rounds (pipeline phase "sweep"): (1) corroboration in batches of
+    a.pairs pairs in sweep_priority() order (re-scored each batch) without the in-run early stop, until sweep_stop()
+    (no new pages); (2) one round that runs no search and
     selects only from the carry pool (+ one-hop links), weighted as usual. Idempotent and resumable: harvest/sweep.json
     records each part; --again redoes both."""
     root = a.root
@@ -3517,25 +3552,42 @@ def cmd_sweep(a):
         done = {}
     subs = clean_plan(json.loads(pf.read_text(encoding="utf-8")))["subquestions"]
     if "verify" not in done:
-        t0 = time.time()
-        prio = sweep_priority(root, subs)
-        qf = corpus.under(root, "claims/.sweep_priority.json")
-        corpus.atomic_write(qf, json.dumps(prio, ensure_ascii=False))
-        before = verify_stats(root)
-        y0 = verified_yield(root)
-        print(f"sweep: corroborating up to {a.pairs} pairs over {len(prio)} single-source clusters, importance "
-              f"order, no early stop", flush=True)
-        conc = live_concurrency(root, a.concurrency)
-        corpus_cmd("verify", str(root), "--concurrency", str(max(min(conc, 8), conc - 16)), "--max-pairs",
-                   str(a.pairs), "--stop-window", "0", "--priority", str(qf))
-        vs = verify_stats(root)
-        done["verify"] = {"clusters": len(prio), "judged": vs.get("judged"), "lifted": vs.get("lifted"),
-                          "yield_before": y0, "yield_after": verified_yield(root),
-                          "minutes": round((time.time() - t0) / 60, 1), "round": st["round"]}
+        batches = done.setdefault("verify_batches", [])
+        y_start = batches[0]["yield_before"] if batches else verified_yield(root)
+        while True:
+            why = sweep_stop(batches, a.pairs, getattr(a, "max_batches", SWEEP_MAX_BATCHES))
+            if why:  # checked first: a resumed sweep whose last stored batch already ended it runs none
+                break
+            if corpus.pause_requested(root):  # STOP file: the finished batches stay in sweep.json, resume continues
+                print(f"  stop requested (STOP file): sweep paused after {len(batches)} batches", flush=True)
+                raise KeyboardInterrupt
+            t0 = time.time()
+            prio = sweep_priority(root, subs)  # re-scored: lifts change each sub-question's need
+            qf = corpus.under(root, "claims/.sweep_priority.json")
+            corpus.atomic_write(qf, json.dumps(prio, ensure_ascii=False))
+            y0 = verified_yield(root)
+            print(f"sweep batch {len(batches) + 1}: corroborating up to {a.pairs} pairs over {len(prio)} single-source "
+                  f"clusters, importance order, no early stop", flush=True)
+            conc = live_concurrency(root, a.concurrency)
+            corpus_cmd("verify", str(root), "--concurrency", str(max(min(conc, 8), conc - 16)), "--max-pairs",
+                       str(a.pairs), "--stop-window", "0", "--priority", str(qf))
+            vs = verify_stats(root)
+            judged, lifted = int(vs.get("judged") or 0), int(vs.get("lifted") or 0)
+            rate = lifted / judged if judged else 0.0
+            batches.append({"clusters": len(prio), "judged": judged, "lifted": lifted, "lift_rate": round(rate, 4),
+                            "yield_before": y0, "yield_after": verified_yield(root),
+                            "minutes": round((time.time() - t0) / 60, 1)})
+            corpus.atomic_write(sf, json.dumps(done, ensure_ascii=False))
+            print(f"sweep batch {len(batches)}: judged {judged} pairs, lifted {lifted} clusters ({rate:.1%}); verified "
+                  f"yield {y0} -> {batches[-1]['yield_after']} ({batches[-1]['minutes']} min)", flush=True)
+        done["verify"] = {"clusters": batches[0]["clusters"] if batches else 0, "batches": len(batches),
+                          "judged": sum(x["judged"] for x in batches), "lifted": sum(x["lifted"] for x in batches),
+                          "yield_before": y_start, "yield_after": verified_yield(root),
+                          "minutes": round(sum(x["minutes"] for x in batches), 1), "round": st["round"], "stop": why}
         corpus.atomic_write(sf, json.dumps(done, ensure_ascii=False))
-        print(f"sweep: corroboration judged {vs.get('judged')} pairs, lifted {vs.get('lifted')} clusters; verified "
-              f"yield {y0} -> {done['verify']['yield_after']} ({done['verify']['minutes']} min)"
-              + (f" [round verify judged {before.get('judged')}]" if before else ""), flush=True)
+        print(f"sweep: corroboration {len(batches)} batches, judged {done['verify']['judged']} pairs, lifted "
+              f"{done['verify']['lifted']} clusters; verified yield {y_start} -> {done['verify']['yield_after']} "
+              f"({done['verify']['minutes']} min); {why}", flush=True)
     if "pool" not in done:
         st = load_state(root)
         last = round_info(root, st["round"]) if st["stage"] == "done" else {}
@@ -3621,7 +3673,9 @@ def main():
         else:
             p.add_argument("--again", action="store_true")
         if name == "sweep":
-            p.add_argument("--pairs", type=int, default=SWEEP_PAIRS, help="corroboration pairs, no early stop")
+            p.add_argument("--pairs", type=int, default=SWEEP_PAIRS, help="corroboration pairs per batch, no early stop")
+            p.add_argument("--max-batches", type=int, default=SWEEP_MAX_BATCHES,
+                           help=f"batches at most (stops earlier below {SWEEP_STOP_LIFT:.0%} lift or out of candidates)")
     p = sub.add_parser("plan"); p.add_argument("root", type=pathlib.Path); p.add_argument("--subs", type=int, default=6)
     p.add_argument("--per-sub", type=int, default=14)
     p = sub.add_parser("novelty", help="v3.4: paraphrase-duplicate yield of the finished rounds -> round-<k>.json")

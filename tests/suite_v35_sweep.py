@@ -167,9 +167,13 @@ def run_corpus(*args):
     r = cur_round()
     write_rows(RUN["root"], [("Yüksek", 2, f"T0 fact {j} r{r}", "finding") for j in range(5 * r)]
                + [("Orta", 1, f"T1 single {j} r{r}", "finding") for j in range(4)])
+    judged, lifted = VQ.pop(0) if VQ and "--priority" in args else (77, 3)
     (RUN["root"] / "claims/.verify_stats.json").write_text(json.dumps(
-        {"claims": 9, "grounded": 9, "corr_s": 0, "verify_s": 0, "judged": 77, "lifted": 3, "max_pairs": 100,
+        {"claims": 9, "grounded": 9, "corr_s": 0, "verify_s": 0, "judged": judged, "lifted": lifted, "max_pairs": 100,
          "early_stop": False}), encoding="utf-8")
+
+
+VQ = []  # (judged, lifted) of the next sweep verify batches (the fake corpus verify)
 
 
 harvest.llm_json, harvest.search_all, harvest.corpus_cmd = run_llm, run_search, run_corpus
@@ -240,6 +244,63 @@ harvest.cmd_sweep(S2)
 sw2 = json.loads((RUN["root"] / "harvest/sweep.json").read_text(encoding="utf-8"))
 check("sweep: no carried candidates -> verify part only, pool recorded as skipped, no new round",
       "verify" in sw2 and sw2["pool"]["round"] is None and harvest.load_state(RUN["root"])["round"] == 1, sw2)
+
+# until saturation: batches of --pairs, each re-scored; stop on a batch below SWEEP_STOP_LIFT or short of pairs
+check("sweep_stop: none yet -> run; full batch at 8% -> run; 2% -> saturated; short batch -> exhausted; ceiling",
+      harvest.sweep_stop([], 5000, 40) is None
+      and harvest.sweep_stop([{"judged": 5000, "lifted": 400}], 5000, 40) is None
+      and harvest.sweep_stop([{"judged": 5000, "lifted": 100}], 5000, 40).startswith("saturated")
+      and harvest.sweep_stop([{"judged": 1200, "lifted": 300}], 5000, 40).startswith("candidates exhausted")
+      and harvest.sweep_stop([{"judged": 5000, "lifted": 400}] * 2, 5000, 2).startswith("ceiling")
+      and harvest.SWEEP_STOP_LIFT == corpus.CORR_STOP_LIFT)
+H3 = new_run("sw-sat")
+harvest.cmd_run(H3)
+RUN["corpus"].clear()
+VQ[:] = [(500, 60), (500, 20), (500, 10), (500, 99)]  # 12%, 4%, 2% -> stops; the 4th never asked
+S3 = argparse.Namespace(**{**vars(S), "root": RUN["root"], "again": False, "pairs": 500})
+harvest.cmd_sweep(S3)
+sw3 = json.loads((RUN["root"] / "harvest/sweep.json").read_text(encoding="utf-8"))
+vcalls = [c for c in RUN["corpus"] if c[0] == "verify" and "--priority" in c]
+check("sweep until saturation: 3 batches of --pairs 500, stops after the one under 3% lift; totals in 'verify'",
+      len(vcalls) == 3 and all(c[c.index("--max-pairs") + 1] == "500" for c in vcalls)
+      and [b["lifted"] for b in sw3["verify_batches"]] == [60, 20, 10] and sw3["verify"]["batches"] == 3
+      and sw3["verify"]["judged"] == 1500 and sw3["verify"]["lifted"] == 90
+      and sw3["verify"]["stop"].startswith("saturated") and VQ == [(500, 99)], (vcalls, sw3))
+VQ[:] = [(500, 60), (120, 30)]
+H4 = new_run("sw-exh")
+harvest.cmd_run(H4)
+S4 = argparse.Namespace(**{**vars(S), "root": RUN["root"], "again": False, "pairs": 500})
+harvest.cmd_sweep(S4)
+sw4 = json.loads((RUN["root"] / "harvest/sweep.json").read_text(encoding="utf-8"))
+check("sweep until saturation: a batch short of --pairs (no candidates left) ends it",
+      sw4["verify"]["batches"] == 2 and sw4["verify"]["stop"].startswith("candidates exhausted"), sw4)
+# resume: a crash after 1 stored batch continues with the next; a stored batch that already ended it runs none
+VQ[:] = [(500, 60)]
+H5 = new_run("sw-res")
+harvest.cmd_run(H5)
+S5 = argparse.Namespace(**{**vars(S), "root": RUN["root"], "again": False, "pairs": 500})
+(RUN["root"] / "STOP").write_text("", encoding="utf-8")
+try:
+    harvest.cmd_sweep(S5)
+    paused = False
+except KeyboardInterrupt:
+    paused = True
+sw5 = json.loads((RUN["root"] / "harvest/sweep.json").read_text(encoding="utf-8")) \
+    if (RUN["root"] / "harvest/sweep.json").exists() else {}
+check("sweep: a STOP file pauses before the next batch (nothing stored as done)",
+      paused and "verify" not in sw5 and VQ == [(500, 60)], sw5)
+harvest.cmd_sweep(S5)  # batch 1 (12%), then the fake's default (77 < 500 pairs) ends it
+VQ[:] = [(500, 1)]
+sw5 = json.loads((RUN["root"] / "harvest/sweep.json").read_text(encoding="utf-8"))
+sw5.pop("verify"); sw5.pop("pool", None)  # as if it crashed after storing batch 2
+(RUN["root"] / "harvest/sweep.json").write_text(json.dumps(sw5), encoding="utf-8")
+RUN["corpus"].clear()
+harvest.cmd_sweep(S5)
+sw5b = json.loads((RUN["root"] / "harvest/sweep.json").read_text(encoding="utf-8"))
+check("sweep resumed after the last batch already ended it: no new verify batch, 'verify' written from the stored ones",
+      not [c for c in RUN["corpus"] if c[0] == "verify" and "--priority" in c] and sw5b["verify"]["batches"] == 2
+      and sw5b["verify"]["stop"].startswith("candidates exhausted") and VQ == [(500, 1)], sw5b)
+VQ.clear()
 
 # ---------- 4. pipeline phase ----------
 names = [p.name for p in pipeline.phases()]

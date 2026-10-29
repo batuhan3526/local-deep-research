@@ -727,6 +727,25 @@ harvest.cmd_run(argparse.Namespace(**vars(H)))
 check("run: births recorded without sub_base -> computed on resume, probe / emerge not re-run",
       CALLS == {"emerge": [1], "probe": [2]} and num(ri(root, 1)["probe"].get("sub_base")) == num(r1["probe"]["sub_base"]),
       ri(root, 1).get("probe"))
+# a sub-question taken out of the plan by hand between rounds (live r29: duplicates dropped): its claims re-sort onto
+# the rest, so round 3's sub_new must start from a re-based sub_base, not round 2's sub_cum
+harvest.save_state(root, round=2, stage="done", target=2)
+pl = json.loads((root / "harvest/plan.json").read_text(encoding="utf-8"))
+pl["subquestions"] = [s for s in pl["subquestions"] if s["id"] != 4]
+(root / "harvest/plan.json").write_text(json.dumps(pl), encoding="utf-8")
+YC[3] = (36, 31, 26)
+PACKS.clear()
+harvest.cmd_run(argparse.Namespace(**{**vars(H), "rounds": 3, "until": 3}))
+r2d, r3 = ri(root, 2), ri(root, 3)
+check("run: S4 left the plan -> sub_base re-based once (T2 claims back on S1), stored with round 2, sub_new small",
+      r2d.get("dropped", {}).get("ids") == ["4"] and num(r2d["dropped"]["sub_base"]) == {"1": 65.0, "2": 25.0, "3": 0.0}
+      and num(r3["sub_base"]) == num(r2d["dropped"]["sub_base"])
+      and num(r3["sub_new"]) == {"1": 2.0, "2": 1.0, "3": 0.0}, (r2d.get("dropped"), r3.get("sub_new")))
+harvest.save_state(root, round=3, stage="search", target=3)
+PACKS.clear()
+harvest.cmd_run(argparse.Namespace(**{**vars(H), "rounds": 3, "until": 3}))
+check("run resumed at round 3's search: the drop's sub_base re-used (no packs in the search stage), sub_new unchanged",
+      PACKS == [3] and num(ri(root, 3)["sub_new"]) == num(r3["sub_new"]), (PACKS, ri(root, 3).get("sub_new")))
 H = new_run("runN", no_probe=True)
 harvest.cmd_run(H)
 check("run --no-probe: probe never called, no 'probe' in round json; emerge still runs",
