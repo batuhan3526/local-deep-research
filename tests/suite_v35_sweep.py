@@ -197,6 +197,7 @@ def ri(root, k):
     return json.loads((root / f"harvest/round-{k}.json").read_text(encoding="utf-8"))
 
 
+harvest.SWEEP_REF_ROUNDS = 0  # the fake verify adds no yield per batch: the opportunity-cost rule is tested below
 H = new_run("sw")
 harvest.cmd_run(H)
 root = RUN["root"]
@@ -327,6 +328,39 @@ check("sweep pool round resumed at fetch: round 2 finished, pool recorded",
 r1x = ri(RUN["root"], 1)
 check("normal rounds: no stage checkpoint (pool_pause only for the pool round)",
       harvest.pool_pause(RUN["root"], argparse.Namespace(), "fetch") is None)
+
+# opportunity cost: a batch earning less yield/min than the last search rounds' mean stops the sweep
+check("sweep_stop: a batch below ref yield/min -> stop; at / above -> go on; no ref (or no minutes) -> rule off",
+      harvest.sweep_stop([{"judged": 500, "lifted": 60, "yield_before": 100, "yield_after": 150, "minutes": 10}],
+                         500, 40, 6.0).startswith("below the rounds' yield/min")
+      and harvest.sweep_stop([{"judged": 500, "lifted": 60, "yield_before": 100, "yield_after": 160, "minutes": 10}],
+                             500, 40, 6.0) is None
+      and harvest.sweep_stop([{"judged": 500, "lifted": 60, "yield_before": 100, "yield_after": 150, "minutes": 10}],
+                             500, 40, None) is None
+      and harvest.sweep_stop([{"judged": 500, "lifted": 60}], 500, 40, 6.0) is None)
+harvest.SWEEP_REF_ROUNDS = 5
+H7 = new_run("sw-ref", rounds=3, until=3)
+harvest.cmd_run(H7)
+for k, (y, ya, q) in {1: (9.0, 8.0, 5), 2: (7.0, None, 5), 3: (5.0, 4.0, 5)}.items():  # round 2: no ypm_adj
+    i = ri(RUN["root"], k); i.update(ypm=y, queries=q); i.pop("ypm_adj", None)
+    if ya is not None:
+        i["ypm_adj"] = ya
+    harvest.round_file(RUN["root"], k).write_text(json.dumps(i), encoding="utf-8")
+check("sweep_ref_ypm: mean of the last rounds' ypm_adj (ypm without it); n limits; 0 -> None",
+      harvest.sweep_ref_ypm(RUN["root"]) == round((8 + 7 + 4) / 3, 3) and harvest.sweep_ref_ypm(RUN["root"], 2) == 5.5
+      and harvest.sweep_ref_ypm(RUN["root"], 0) is None, harvest.sweep_ref_ypm(RUN["root"]))
+YS = [100.0, 100.0, 200.0, 200.0, 210.0]  # start, b1 +100 (50/min), b2 +10 (5/min, fake clock 2 min a batch)
+real_vy = harvest.verified_yield
+harvest.verified_yield = lambda root: YS.pop(0) if len(YS) > 1 else YS[0]
+VQ[:] = [(500, 60), (500, 60), (500, 60)]
+S7 = argparse.Namespace(**{**vars(S), "root": RUN["root"], "again": False, "pairs": 500})
+harvest.cmd_sweep(S7)
+harvest.verified_yield = real_vy
+sw7 = json.loads((RUN["root"] / "harvest/sweep.json").read_text(encoding="utf-8"))
+check("sweep: batch 2 earns less yield/min than the rounds' mean -> stops there (lift 12% would have gone on); "
+      "ref stored", sw7["verify"]["batches"] == 2 and sw7["verify"]["stop"].startswith("below the rounds' yield/min")
+      and sw7["ref_ypm"] == round((8 + 7 + 4) / 3, 3) and VQ == [(500, 60)], sw7)
+VQ.clear()
 
 # ---------- 4. pipeline phase ----------
 names = [p.name for p in pipeline.phases()]

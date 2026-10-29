@@ -205,6 +205,10 @@ THIN_KINDS = ("number", "limitation")  # claim kinds that show evaluated, quanti
 SWEEP_PAIRS = 5000     # pairs per batch, ~40 min at the live ~2 judgements / s
 SWEEP_STOP_LIFT = 0.03  # = the round verify's early-stop rate (corpus.CORR_STOP_LIFT)
 SWEEP_MAX_BATCHES = 40  # safety ceiling only (200k pairs, ~28 h)
+# Opportunity cost: a batch that earns less verified yield per minute than the run's own last SWEEP_REF_ROUNDS search
+# rounds did stops the sweep (the time is worth more as rounds / the report). Live OSINT run: the lift settled at
+# 8-10% (never near 3%) while a batch's yield/min fell from 31 to ~10-12, below the last 5 rounds' 12.8. 0 = off.
+SWEEP_REF_ROUNDS = 5
 SWEEP_KIND_BONUS = 0.1  # a number / limitation claim (THIN_KINDS) first among equally relevant ones
 PROBE_DEPTH_ASK = 4    # depth gaps per round: a separate LLM call over the thin topics (probe_depth())
 # (live round 23: it re-proposed "OSINT Geolocation Methods" next to a sub-question listing geolocation methods; MiniLM
@@ -3531,16 +3535,37 @@ def pool_pause(root, a, stage):
         raise KeyboardInterrupt
 
 
-def sweep_stop(batches, pairs, max_batches):
-    """why the sweep's corroboration stops after these batches ({judged, lifted} each), None = run another: the last
-    batch judged fewer than `pairs` (no candidates left) or lifted < SWEEP_STOP_LIFT of its judgements, or the
-    max_batches ceiling"""
+def sweep_ref_ypm(root, n=None):
+    """the opportunity-cost reference of the sweep: the mean yield/min (ypm_adj when present, rebased to the last
+    round's rule like ref_ypm) of the last n search rounds before it (pool-only rounds, 0 queries, left out); None
+    without rounds or with n = 0"""
+    n = SWEEP_REF_ROUNDS if n is None else n
+    last = int(load_state(root).get("round") or 0)
+    ys = []
+    for k in range(last, 0, -1):
+        if len(ys) >= n:
+            break
+        i = round_info(root, k)
+        if "ypm" not in i or not int(i.get("queries") or 0):
+            continue
+        ys.append(float(i["ypm_adj"] if i.get("ypm_adj") is not None else i["ypm"]) * rebase_factor(root, k, last))
+    return round(sum(ys) / len(ys), 3) if ys else None
+
+
+def sweep_stop(batches, pairs, max_batches, ref=None):
+    """why the sweep's corroboration stops after these batches ({judged, lifted, yield_before, yield_after,
+    minutes} each), None = run another: the last batch judged fewer than `pairs` (no candidates left), lifted
+    < SWEEP_STOP_LIFT of its judgements, or earned less yield/min than ref (sweep_ref_ypm: the last rounds' mean),
+    or the max_batches ceiling"""
     if batches:
         x = batches[-1]
         if int(x["judged"]) < pairs:
             return f"candidates exhausted ({x['judged']} < {pairs} pairs)"
         if x["lifted"] / max(1, x["judged"]) < SWEEP_STOP_LIFT:
             return f"saturated (lift {x['lifted'] / max(1, x['judged']):.1%} < {SWEEP_STOP_LIFT:.0%})"
+        ypm = (float(x.get("yield_after", 0)) - float(x.get("yield_before", 0))) / max(0.01, float(x.get("minutes") or 0))
+        if ref and "minutes" in x and ypm < ref:
+            return f"below the rounds' yield/min (batch {ypm:.2f} < last rounds' mean {ref:.2f})"
     if len(batches) >= max_batches:
         return f"ceiling {max_batches} batches"
     return None
@@ -3566,8 +3591,9 @@ def cmd_sweep(a):
     if "verify" not in done:
         batches = done.setdefault("verify_batches", [])
         y_start = batches[0]["yield_before"] if batches else verified_yield(root)
+        ref = done.setdefault("ref_ypm", sweep_ref_ypm(root))  # fixed at the start (a pool round must not move it)
         while True:
-            why = sweep_stop(batches, a.pairs, getattr(a, "max_batches", SWEEP_MAX_BATCHES))
+            why = sweep_stop(batches, a.pairs, getattr(a, "max_batches", SWEEP_MAX_BATCHES), ref)
             if why:  # checked first: a resumed sweep whose last stored batch already ended it runs none
                 break
             if corpus.pause_requested(root):  # STOP file: the finished batches stay in sweep.json, resume continues
@@ -3579,7 +3605,8 @@ def cmd_sweep(a):
             corpus.atomic_write(qf, json.dumps(prio, ensure_ascii=False))
             y0 = verified_yield(root)
             print(f"sweep batch {len(batches) + 1}: corroborating up to {a.pairs} pairs over {len(prio)} single-source "
-                  f"clusters, importance order, no early stop", flush=True)
+                  f"clusters, importance order, no early stop"
+                  + (f" (the sweep stops below the last rounds' {ref:.2f} yield/min)" if ref else ""), flush=True)
             conc = live_concurrency(root, a.concurrency)
             corpus_cmd("verify", str(root), "--concurrency", str(max(min(conc, 8), conc - 16)), "--max-pairs",
                        str(a.pairs), "--stop-window", "0", "--priority", str(qf))
@@ -3591,11 +3618,13 @@ def cmd_sweep(a):
                             "minutes": round((time.time() - t0) / 60, 1)})
             corpus.atomic_write(sf, json.dumps(done, ensure_ascii=False))
             print(f"sweep batch {len(batches)}: judged {judged} pairs, lifted {lifted} clusters ({rate:.1%}); verified "
-                  f"yield {y0} -> {batches[-1]['yield_after']} ({batches[-1]['minutes']} min)", flush=True)
+                  f"yield {y0} -> {batches[-1]['yield_after']} ({batches[-1]['minutes']} min, "
+                  f"{(batches[-1]['yield_after'] - y0) / max(0.01, batches[-1]['minutes']):.2f}/min)", flush=True)
         done["verify"] = {"clusters": batches[0]["clusters"] if batches else 0, "batches": len(batches),
                           "judged": sum(x["judged"] for x in batches), "lifted": sum(x["lifted"] for x in batches),
                           "yield_before": y_start, "yield_after": verified_yield(root),
-                          "minutes": round(sum(x["minutes"] for x in batches), 1), "round": st["round"], "stop": why}
+                          "minutes": round(sum(x["minutes"] for x in batches), 1), "round": st["round"], "stop": why,
+                          "ref_ypm": ref}
         corpus.atomic_write(sf, json.dumps(done, ensure_ascii=False))
         print(f"sweep: corroboration {len(batches)} batches, judged {done['verify']['judged']} pairs, lifted "
               f"{done['verify']['lifted']} clusters; verified yield {y_start} -> {done['verify']['yield_after']} "
