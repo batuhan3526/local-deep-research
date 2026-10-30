@@ -79,6 +79,8 @@ order = [p.name for p in pipeline.phases()]
 check("phase -> stage: everything before outline collects, outline and later report",
       [stages.stage_of(n, order) for n in ("plan", "harvest", "gap", "numeric", "outline", "write", "verify")]
       == ["collect"] * 4 + ["report"] * 3)
+check("the profile phase switches no stage (a resume in the report stage keeps the report server up)",
+      "profile" in stages.NO_LLM and "if p.name not in stages.NO_LLM" in pathlib.Path(pipeline.__file__).read_text())
 
 # ---------- wire / throttling ----------
 config.set_for_tests(config.Settings(llm_token_param="max_completion_tokens", llm_temperature=False))

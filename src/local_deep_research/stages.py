@@ -23,6 +23,8 @@ import time
 from . import config
 
 REPORT_FROM = "outline"  # the first report phase; every phase before it collects
+NO_LLM = ("profile",)  # phases that need no model server: no stage switch for them (live 2026-10-30: a resume
+# in the report stage stopped Qwen and loaded Sage for the profile phase alone, ~10 min lost per restart)
 
 
 def stage_of(phase, order):

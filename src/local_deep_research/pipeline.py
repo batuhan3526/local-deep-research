@@ -420,7 +420,8 @@ def run(root, profile_args=(), until=None, plist=None, concurrency=None, sample=
                     raise KeyboardInterrupt
                 current[0] = p.name
                 try:
-                    switch.enter(stages.stage_of(p.name, order))
+                    if p.name not in stages.NO_LLM:
+                        switch.enter(stages.stage_of(p.name, order))
                     if not concurrency:  # the stage's own llm_concurrency, unless --concurrency was given
                         ctx = ctx._replace(conc=int(getattr(config.get(), "llm_concurrency", 16) or 16))
                 except Exception as e:  # noqa: BLE001  a stage server that does not come up stops the run
