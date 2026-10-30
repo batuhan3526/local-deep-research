@@ -76,14 +76,14 @@ SEEN.clear(); ANSWERS[:] = [(LOOP, "length"), ConnectionError("400 unknown field
 out = quiet(llm.chat_text, "q", 6000, "t", tries=3)
 check("llm.chat_text: a server that rejects the penalty field gets the plain request again",
       out == "whole" and [s[2] for s in SEEN] == [None, {"repetition_penalty": 1.05}, None], [s[2] for s in SEEN])
-SEEN.clear(); ANSWERS[:] = [(LOOP, "length")] * 3
+SEEN.clear(); ANSWERS[:] = [(LOOP, "length")] * 5
 try:
-    quiet(llm.chat_text, "q", 6000, "t", tries=3)
+    quiet(llm.chat_text, "q", 6000, "t", tries=1)
     ok = False
 except llm.LLMError as e:
-    ok = "looped" in str(e) and [s[2] for s in SEEN] == [None, {"repetition_penalty": 1.05}, {"repetition_penalty": 1.1}]
-check("llm.chat_text: the penalty rises per looped try (live: S9 looped twice at 1.05); still bounded by the tries",
-      ok, [s[2] for s in SEEN])
+    ok = "looped" in str(e) and [s[2] for s in SEEN] == [None] + [{"repetition_penalty": p} for p in llm.LOOP_PENALTIES]
+check("llm.chat_text: loop re-asks do not use up the tries, the penalty rises (live: S9 looped 3x at 1.05), "
+      "bounded by LOOP_PENALTIES", ok, [s[2] for s in SEEN])
 check("llm.looping: 5 equal lines loop; distinct lines and short '-' placeholders do not",
       llm.looping(LOOP) and not llm.looping("\n".join(f"- claim {k}" for k in range(300)) + "\n-" * 8))
 SEEN.clear(); ANSWERS[:] = [("x", "length")] * 3

@@ -93,9 +93,9 @@ def request(messages, max_tokens, kind, json_mode=False, temperature=0.3, timeou
 
 
 LOOP_REPEATS = 5  # a line seen this often in a cut answer = the model is looping (written notes: at most 2-3)
-LOOP_PENALTIES = (1.05, 1.1, 1.15)  # repetition_penalty (vLLM / SGLang) per looped try, rising: live 2026-10-30 on
-# Sage, 1.05 ended both looping notes in a test (7.6k / 4.5k tokens, all headings) but S9 then looped twice more at
-# 1.05 in the run; 1.1 had ended S9 in the test. frequency_penalty 0.3 shrank the notes to ~1.5k tokens.
+LOOP_PENALTIES = (1.05, 1.1, 1.15, 1.2)  # repetition_penalty (vLLM / SGLang) per looped answer, rising; these
+# re-asks do not use up a try. Live 2026-10-30 on Sage: S9 looped at 1.05 three times, ended at 1.1 / 1.15 / 1.2 in
+# 4 of 4 samples (3-8k tokens, all headings); frequency_penalty 0.3 shrank the notes to ~1.5k tokens.
 
 
 def looping(text):
@@ -127,8 +127,9 @@ def chat_text(messages, max_tokens, kind, system=None, json_mode=False, temperat
             continue
         if fin == "length" and looping(out or ""):
             last = f"answer looped at max_tokens={max_tokens}"
-            t += 1
-            extra = {"repetition_penalty": LOOP_PENALTIES[min(loops, len(LOOP_PENALTIES) - 1)]}
+            if loops >= len(LOOP_PENALTIES):
+                break  # still looping at the strongest penalty
+            extra = {"repetition_penalty": LOOP_PENALTIES[loops]}
             loops += 1
             continue
         if fin == "length":
