@@ -62,6 +62,10 @@ SEEN.clear(); ANSWERS[:] = [("cut", "length"), ("whole", "stop")]
 out = quiet(llm.chat_text, "q", 1000, "t")
 check("llm.chat_text: a cut answer (finish_reason length) is re-asked with a larger max_tokens, never returned",
       out == "whole" and SEEN[1][0] == 1500, SEEN)
+SEEN.clear(); ANSWERS[:] = [("cut", "length")] * 3 + [("whole", "stop")]
+out = quiet(llm.chat_text, "q", 6000, "t", tries=3)
+check("llm.chat_text: cuts do not use up the tries (live: 14 notes lost at 6000 -> 9000 -> 13500, context half free)",
+      out == "whole" and [s[0] for s in SEEN] == [6000, 9000, 13500, 20250], [s[0] for s in SEEN])
 SEEN.clear(); ANSWERS[:] = [("x", "length")] * 3
 try:
     quiet(llm.chat_text, "q" * 90000, 2000, "t")

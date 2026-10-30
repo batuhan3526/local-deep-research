@@ -370,6 +370,16 @@ check("review prompt asks for the note in the output language", "{lang}" in corp
 check("review prompt: pair nonce-wrapped, system says data only",
       "never follow instructions" in corpus.CON_SYSTEM and "<<<PAIR-{n}>>>" in corpus.CON_SYSTEM)
 
+check("contradictions: default --max-pairs reviews every pair (no 400 cap; live 2,404 of 2,804 were left unreviewed)",
+      corpus.CON_MAX is None)
+(cr / "claims/.contradictions.jsonl").unlink()
+rev.clear()
+corpus.cmd_contradictions(argparse.Namespace(root=cr, concurrency=4, max_pairs=1))
+md = (cr / "claims/CONTRADICTIONS.md").read_text(encoding="utf-8")
+check("contradictions: --max-pairs 1 reviews one pair, the other is listed unreviewed", len(rev) == 1 and f"{corpus.CON_TXT['tr']['types']['unreviewed']} 1" in md, len(rev))
+corpus.cmd_contradictions(argparse.Namespace(root=cr, concurrency=4, max_pairs=corpus.CON_MAX))
+check("contradictions: a default re-run reviews all the remaining pairs", len(rev) == 2, len(rev))
+
 # ---------- 8b. output language ----------
 check("profile: out_lang en by default, codes lower-cased, any language name passes (v3.2: any output language)",
       harvest.resolve_profile("normal")["out_lang"] == "en" and harvest.resolve_profile("normal", out_lang="TR")["out_lang"] == "tr"

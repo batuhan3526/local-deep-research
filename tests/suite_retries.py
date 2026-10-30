@@ -55,6 +55,23 @@ for mod, call in ((outline, lambda: outline.ask("p", 1500, "k")), (sections, lam
 seen = []
 
 
+for mod, call in ((outline, lambda: outline.ask("p", 1500, "k", tries=3)), (sections, lambda: sections.ask("p", 1500, "k", tries=3)),
+                  (verify_fix, lambda: verify_fix.ask("p", 1500, tries=3))):
+    seen = []
+
+    def fake(prompt, max_tokens, *a, _seen=seen, _mod=mod):
+        _seen.append(max_tokens)
+        if max_tokens < 12000:
+            raise corpus.AnswerCut("cut")
+        return {"ok": 1} if _mod is not sections else "text"
+    mod.llm = fake
+    with contextlib.redirect_stderr(io.StringIO()):
+        res = call()
+    check(f"{mod.__name__.split('.')[-1]}.ask: cuts do not use up the tries (live 2026-10-30: 14 notes lost to 3 cuts)",
+          seen == [1500, 3000, 6000, 12000] and res, seen)
+seen = []
+
+
 def always_cut(prompt, max_tokens, *a):
     seen.append(max_tokens)
     raise corpus.AnswerCut("cut")

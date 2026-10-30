@@ -129,20 +129,24 @@ def llm(prompt, max_tokens, kind):
 
 def ask(prompt, max_tokens, kind, tries=3):
     """retries a failed call; an answer cut at max_tokens is retried with twice the budget (live run 2026-10-20:
-    Turkish theme summaries in indented JSON ran past 1500 + 12/line tokens and three equal retries all cut)"""
+    Turkish theme summaries in indented JSON ran past 1500 + 12/line tokens and three equal retries all cut).
+    A cut does not use up a try, the context bounds it (live 2026-10-30: 14 of 41 notes lost to three cuts)."""
     max_tokens = corpus.fit_budget(max_tokens, prompt)
-    for t in range(tries):
+    t = 0
+    while t < tries:
         try:
             out = llm(prompt, max_tokens, kind)
             if out.strip():
                 return out
+            t += 1
         except corpus.AnswerCut:
-            print(f"  {kind} answer cut at {max_tokens} tokens ({t + 1}/{tries}): retrying with more", file=sys.stderr)
+            print(f"  {kind} answer cut at {max_tokens} tokens: retrying with more", file=sys.stderr)
             max_tokens = corpus.grow_budget(max_tokens, prompt)
             if max_tokens is None:  # no room left in the server's context for a longer answer
                 break
         except Exception as e:  # noqa: BLE001  transport / HTTP / cut answer: retry, then give up on this call
-            print(f"  {kind} call failed ({t + 1}/{tries}): {type(e).__name__} {str(e)[:120]}", file=sys.stderr)
+            t += 1
+            print(f"  {kind} call failed ({t}/{tries}): {type(e).__name__} {str(e)[:120]}", file=sys.stderr)
     return None
 
 

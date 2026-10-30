@@ -92,17 +92,20 @@ def request(messages, max_tokens, kind, json_mode=False, temperature=0.3, timeou
 
 def chat_text(messages, max_tokens, kind, system=None, json_mode=False, temperature=0.3, tries=None, meta=None):
     """the model's answer as text (think blocks stripped); LLMError when no usable answer came after the retries.
-    finish_reason "length" = the answer was cut: retried with 1.5x max_tokens while prompt + answer still fit."""
+    finish_reason "length" = the answer was cut: retried with 1.5x max_tokens while prompt + answer still fit. A cut
+    does not use up a try (live 2026-10-30: 14 of 41 reader notes were cut at 6000 -> 9000 -> 13500 with the
+    context still half free; the written notes ran to ~15k tokens): it is bounded by the context instead."""
     msgs = _messages(messages, system)
     tries = int(tries or getattr(_settings(), "llm_retries", 3) or 3)
     prompt_tok = sum(len(m.get("content") or "") for m in msgs) // CHARS_PER_TOKEN
     ctx = int(getattr(_settings(), "llm_context", 32768) or 32768)
-    last = "no attempt"
-    for _ in range(tries):
+    last, t = "no attempt", 0
+    while t < tries:
         try:
             out, fin = request(msgs, max_tokens, kind, json_mode, temperature, meta=meta)
         except Exception as e:  # noqa: BLE001  transport / HTTP / malformed: retry
             last = f"{type(e).__name__}: {str(e)[:200]}"
+            t += 1
             time.sleep(1)
             continue
         if fin == "length":
@@ -112,6 +115,7 @@ def chat_text(messages, max_tokens, kind, system=None, json_mode=False, temperat
                 break  # no room left: a longer answer cannot fit this server's context
             max_tokens = bigger
             continue
+        t += 1
         out = strip_think(out)
         if out:
             return out

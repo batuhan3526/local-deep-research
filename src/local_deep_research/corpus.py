@@ -2046,7 +2046,8 @@ def out_lang(root):
     except (OSError, ValueError, AttributeError):
         x = None
     return x if isinstance(x, str) and x in CON_TXT else ("en" if not isinstance(x, str) else x.lower()[:5])
-CON_MAX = 400  # pairs reviewed per run (the rest is listed unreviewed)
+CON_MAX = None  # pairs reviewed per run: all by default (live 2026-10-30: a cap of 400 left 2,404 of 2,804 pairs
+# unreviewed; all of them took 7 min). --max-pairs N caps a run, the rest is listed unreviewed
 _CON_LINE = re.compile(r"^- \*\*(Yüksek|Orta)\*\* (.+) — çelişen: (\S+) — \"(.*)\"$")
 
 
