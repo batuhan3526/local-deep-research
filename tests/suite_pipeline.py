@@ -44,8 +44,8 @@ def quiet(fn, *a, **k):
 ANSWERS, SEEN = [], []
 
 
-def fake_request(messages, max_tokens, kind, json_mode=False, temperature=0.3, timeout=None, meta=None):
-    SEEN.append((max_tokens, messages))
+def fake_request(messages, max_tokens, kind, json_mode=False, temperature=0.3, timeout=None, meta=None, extra=None):
+    SEEN.append((max_tokens, messages, extra))
     a = ANSWERS.pop(0)
     if isinstance(a, Exception):
         raise a
@@ -66,6 +66,24 @@ SEEN.clear(); ANSWERS[:] = [("cut", "length")] * 3 + [("whole", "stop")]
 out = quiet(llm.chat_text, "q", 6000, "t", tries=3)
 check("llm.chat_text: cuts do not use up the tries (live: 14 notes lost at 6000 -> 9000 -> 13500, context half free)",
       out == "whole" and [s[0] for s in SEEN] == [6000, 9000, 13500, 20250], [s[0] for s in SEEN])
+LOOP = "\n".join(["- [High] a claim that keeps coming back"] * 6 + ["- another"])
+SEEN.clear(); ANSWERS[:] = [(LOOP, "length"), ("whole", "stop")]
+out = quiet(llm.chat_text, "q", 6000, "t", tries=3)
+check("llm.chat_text: a cut answer that loops is re-asked with the loop penalty at the same budget, not grown",
+      out == "whole" and [(s[0], s[2]) for s in SEEN] == [(6000, None), (6000, llm.LOOP_PENALTY)], [(s[0], s[2]) for s in SEEN])
+SEEN.clear(); ANSWERS[:] = [(LOOP, "length"), ConnectionError("400 unknown field"), ("whole", "stop")]
+out = quiet(llm.chat_text, "q", 6000, "t", tries=3)
+check("llm.chat_text: a server that rejects the penalty field gets the plain request again",
+      out == "whole" and [s[2] for s in SEEN] == [None, llm.LOOP_PENALTY, None], [s[2] for s in SEEN])
+SEEN.clear(); ANSWERS[:] = [(LOOP, "length")] * 3
+try:
+    quiet(llm.chat_text, "q", 6000, "t", tries=3)
+    ok = False
+except llm.LLMError as e:
+    ok = "looped" in str(e) and len(SEEN) == 3
+check("llm.chat_text: a loop that the penalty does not end uses up the tries (bounded, LLMError)", ok, len(SEEN))
+check("llm.looping: 5 equal lines loop; distinct lines and short '-' placeholders do not",
+      llm.looping(LOOP) and not llm.looping("\n".join(f"- claim {k}" for k in range(300)) + "\n-" * 8))
 SEEN.clear(); ANSWERS[:] = [("x", "length")] * 3
 try:
     quiet(llm.chat_text, "q" * 90000, 2000, "t")

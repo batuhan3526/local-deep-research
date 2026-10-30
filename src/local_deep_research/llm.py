@@ -14,6 +14,7 @@ URL whitelist). `enable_thinking: False` is sent only via chat_template_kwargs a
 llm_no_think is on: servers whose template does not know the switch may reject unknown request fields.
 Optional settings (read with getattr, defaults here): llm_no_think (False), llm_timeout (900 s), llm_retries (3).
 """
+import collections
 import json
 import re
 import threading
@@ -75,12 +76,13 @@ def _messages(messages, system):
             else []) + list(messages)
 
 
-def request(messages, max_tokens, kind, json_mode=False, temperature=0.3, timeout=None, meta=None):
+def request(messages, max_tokens, kind, json_mode=False, temperature=0.3, timeout=None, meta=None, extra=None):
     """one POST to /chat/completions -> (content, finish_reason); raises on transport / HTTP / malformed replies"""
     from . import corpus
     s = _settings()
     body = {"model": s.llm_model, "temperature": temperature, "max_tokens": int(max_tokens), "messages": messages}
     body.update(corpus.chat_extra(json_mode))
+    body.update(extra or {})
     t0 = time.monotonic()
     with _slots():
         r = corpus.send(s.chat_url, body, corpus.auth(), timeout or float(getattr(s, "llm_timeout", 900) or 900))
@@ -90,23 +92,42 @@ def request(messages, max_tokens, kind, json_mode=False, temperature=0.3, timeou
     return (ch.get("message") or {}).get("content") or "", ch.get("finish_reason")
 
 
+LOOP_REPEATS = 5  # a line seen this often in a cut answer = the model is looping (written notes: at most 2-3)
+LOOP_PENALTY = {"repetition_penalty": 1.05}  # vLLM / SGLang; live 2026-10-30 on Sage: 1.05 ended both looping notes
+# (7.6k / 4.5k tokens, all headings), 1.1 still looped one, frequency_penalty 0.3 cut them to ~1.5k tokens
+
+
+def looping(text):
+    """True when a cut answer repeats itself: a longer budget only buys more of the same loop"""
+    lines = [ln.strip() for ln in text.splitlines() if len(ln.strip()) >= 20]  # not "-", "---" or short headings
+    return bool(lines) and max(collections.Counter(lines).values()) >= LOOP_REPEATS
+
+
 def chat_text(messages, max_tokens, kind, system=None, json_mode=False, temperature=0.3, tries=None, meta=None):
     """the model's answer as text (think blocks stripped); LLMError when no usable answer came after the retries.
     finish_reason "length" = the answer was cut: retried with 1.5x max_tokens while prompt + answer still fit. A cut
     does not use up a try (live 2026-10-30: 14 of 41 reader notes were cut at 6000 -> 9000 -> 13500 with the
-    context still half free; the written notes ran to ~15k tokens): it is bounded by the context instead."""
+    context still half free; the written notes ran to ~15k tokens): it is bounded by the context instead. A cut
+    answer that loops (live: S3 / S9 notes repeated one line 300 times up to 44k tokens) is not grown but re-asked
+    with LOOP_PENALTY, which is dropped again if the server refuses the field."""
     msgs = _messages(messages, system)
     tries = int(tries or getattr(_settings(), "llm_retries", 3) or 3)
     prompt_tok = sum(len(m.get("content") or "") for m in msgs) // CHARS_PER_TOKEN
     ctx = int(getattr(_settings(), "llm_context", 32768) or 32768)
-    last, t = "no attempt", 0
+    last, t, extra = "no attempt", 0, None
     while t < tries:
         try:
-            out, fin = request(msgs, max_tokens, kind, json_mode, temperature, meta=meta)
+            out, fin = request(msgs, max_tokens, kind, json_mode, temperature, meta=meta, extra=extra)
         except Exception as e:  # noqa: BLE001  transport / HTTP / malformed: retry
             last = f"{type(e).__name__}: {str(e)[:200]}"
             t += 1
+            extra = None  # a server that rejects the penalty field gets the plain request again
             time.sleep(1)
+            continue
+        if fin == "length" and looping(out or ""):
+            last = f"answer looped at max_tokens={max_tokens}"
+            t += 1
+            extra = LOOP_PENALTY
             continue
         if fin == "length":
             last = f"answer cut at max_tokens={max_tokens}"
