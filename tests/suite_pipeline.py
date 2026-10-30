@@ -70,18 +70,20 @@ LOOP = "\n".join(["- [High] a claim that keeps coming back"] * 6 + ["- another"]
 SEEN.clear(); ANSWERS[:] = [(LOOP, "length"), ("whole", "stop")]
 out = quiet(llm.chat_text, "q", 6000, "t", tries=3)
 check("llm.chat_text: a cut answer that loops is re-asked with the loop penalty at the same budget, not grown",
-      out == "whole" and [(s[0], s[2]) for s in SEEN] == [(6000, None), (6000, llm.LOOP_PENALTY)], [(s[0], s[2]) for s in SEEN])
+      out == "whole" and [(s[0], s[2]) for s in SEEN] == [(6000, None), (6000, {"repetition_penalty": 1.05})],
+      [(s[0], s[2]) for s in SEEN])
 SEEN.clear(); ANSWERS[:] = [(LOOP, "length"), ConnectionError("400 unknown field"), ("whole", "stop")]
 out = quiet(llm.chat_text, "q", 6000, "t", tries=3)
 check("llm.chat_text: a server that rejects the penalty field gets the plain request again",
-      out == "whole" and [s[2] for s in SEEN] == [None, llm.LOOP_PENALTY, None], [s[2] for s in SEEN])
+      out == "whole" and [s[2] for s in SEEN] == [None, {"repetition_penalty": 1.05}, None], [s[2] for s in SEEN])
 SEEN.clear(); ANSWERS[:] = [(LOOP, "length")] * 3
 try:
     quiet(llm.chat_text, "q", 6000, "t", tries=3)
     ok = False
 except llm.LLMError as e:
-    ok = "looped" in str(e) and len(SEEN) == 3
-check("llm.chat_text: a loop that the penalty does not end uses up the tries (bounded, LLMError)", ok, len(SEEN))
+    ok = "looped" in str(e) and [s[2] for s in SEEN] == [None, {"repetition_penalty": 1.05}, {"repetition_penalty": 1.1}]
+check("llm.chat_text: the penalty rises per looped try (live: S9 looped twice at 1.05); still bounded by the tries",
+      ok, [s[2] for s in SEEN])
 check("llm.looping: 5 equal lines loop; distinct lines and short '-' placeholders do not",
       llm.looping(LOOP) and not llm.looping("\n".join(f"- claim {k}" for k in range(300)) + "\n-" * 8))
 SEEN.clear(); ANSWERS[:] = [("x", "length")] * 3

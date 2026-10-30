@@ -93,8 +93,9 @@ def request(messages, max_tokens, kind, json_mode=False, temperature=0.3, timeou
 
 
 LOOP_REPEATS = 5  # a line seen this often in a cut answer = the model is looping (written notes: at most 2-3)
-LOOP_PENALTY = {"repetition_penalty": 1.05}  # vLLM / SGLang; live 2026-10-30 on Sage: 1.05 ended both looping notes
-# (7.6k / 4.5k tokens, all headings), 1.1 still looped one, frequency_penalty 0.3 cut them to ~1.5k tokens
+LOOP_PENALTIES = (1.05, 1.1, 1.15)  # repetition_penalty (vLLM / SGLang) per looped try, rising: live 2026-10-30 on
+# Sage, 1.05 ended both looping notes in a test (7.6k / 4.5k tokens, all headings) but S9 then looped twice more at
+# 1.05 in the run; 1.1 had ended S9 in the test. frequency_penalty 0.3 shrank the notes to ~1.5k tokens.
 
 
 def looping(text):
@@ -109,12 +110,12 @@ def chat_text(messages, max_tokens, kind, system=None, json_mode=False, temperat
     does not use up a try (live 2026-10-30: 14 of 41 reader notes were cut at 6000 -> 9000 -> 13500 with the
     context still half free; the written notes ran to ~15k tokens): it is bounded by the context instead. A cut
     answer that loops (live: S3 / S9 notes repeated one line 300 times up to 44k tokens) is not grown but re-asked
-    with LOOP_PENALTY, which is dropped again if the server refuses the field."""
+    with a rising LOOP_PENALTIES repetition_penalty, dropped again if the server refuses the field."""
     msgs = _messages(messages, system)
     tries = int(tries or getattr(_settings(), "llm_retries", 3) or 3)
     prompt_tok = sum(len(m.get("content") or "") for m in msgs) // CHARS_PER_TOKEN
     ctx = int(getattr(_settings(), "llm_context", 32768) or 32768)
-    last, t, extra = "no attempt", 0, None
+    last, t, extra, loops = "no attempt", 0, None, 0
     while t < tries:
         try:
             out, fin = request(msgs, max_tokens, kind, json_mode, temperature, meta=meta, extra=extra)
@@ -127,7 +128,8 @@ def chat_text(messages, max_tokens, kind, system=None, json_mode=False, temperat
         if fin == "length" and looping(out or ""):
             last = f"answer looped at max_tokens={max_tokens}"
             t += 1
-            extra = LOOP_PENALTY
+            extra = {"repetition_penalty": LOOP_PENALTIES[min(loops, len(LOOP_PENALTIES) - 1)]}
+            loops += 1
             continue
         if fin == "length":
             last = f"answer cut at max_tokens={max_tokens}"
